@@ -253,6 +253,8 @@ Bundles and scheduled_posts store `authoredByUser` + `authoredByAccount` (JWT `u
 
 Deploy compose, secrets, and monitors are **not** this repository.
 
+Feature work lands on **develop** via pull request. A push to `develop` opens a release PR onto **main**.
+
 ---
 
 ## Open questions
