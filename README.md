@@ -11,7 +11,7 @@ This repository is the Outbox **application**. Deployment config lives in the in
 ## Goals
 
 1. Phase 1: publish to **X** through the official API (OAuth 2.0) for **one** brand, with a real post as proof.
-2. Login is the existing DFX JWT (`api.dfx.swiss`). Compose/submit requires a new `UserRole.OUTBOX` on the user's userData (same gesture as Support/Compliance). Approve requires `UserRole.ADMIN`.
+2. Login is the existing DFX JWT (`api.dfx.swiss`). Compose/submit requires `hasRoleAccess(OUTBOX, payload.role)` — the user's own `UserRole.OUTBOX`, or Admin/SuperAdmin via additionalRoles. Grant Outbox like Support: set `User.role` on the user of the target userData. Approve requires `UserRole.ADMIN`.
 3. Approval is the only insert into the send queue. GET never mutates.
 4. Outcomes `sent` | `failed` | `uncertain`. `uncertain` is never auto-retried. Approvers retry `failed` and resolve `uncertain`.
 5. No LLM. Content packs (`facts-sheet.md`, `voice-guide.md`, `rules.json`) are deterministic checks.
@@ -56,7 +56,7 @@ Browser/SSR uses the cookie. Outbox always sends `Authorization: Bearer` to the 
 **Checks inside Outbox**
 
 - Verify HS256 with the **same JWT secret** as the DFX API. Mail-elevated staff tokens include `address`. Account tokens do not; they are not enough. Copy the default JWT validate branch (`address && user && account`). Outbox users need a wallet, like Support.
-- `hasRoleAccess(entryRole, payload.role)` with the DFX hierarchy. Compose/submit: `OUTBOX`. Decide/retry/resolve: `ADMIN`. Admin/SuperAdmin may compose (additionalRoles).
+- `hasRoleAccess(entryRole, payload.role)` with the DFX hierarchy. Compose/submit/retract: `OUTBOX` (retract also `authoredBy`; Outbox introspect). Decide/retry/resolve: `ADMIN` (Admin introspect). Retract is **not** Admin-only. Admin/SuperAdmin may compose via additionalRoles.
 - Audit uses JWT `user` and `account`, never a typed email.
 - Introspect **every** authenticated route (HTML GET, API, mutations).
   - `GET /v1/auth/introspect/outbox`: `RoleGuard(OUTBOX)` (Admin via additionalRoles). If `payload.role === OUTBOX`: mail-origin claim `tfaRequired` **and** the DFX TFA interceptor must have passed (completed TOTP). Wallet-Outbox tokens → 403. A pre-verify magic-link JWT still carries the claim but introspect stays 403 until `2fa/verify`. Admin/SuperAdmin on this route without that claim is allowed.
@@ -92,7 +92,7 @@ Node 22, no frontend bundler. SQLite WAL on durable storage.
 
 ### Draft → queue → X
 
-Promote in the **same SQLite transaction** as `submitted → approved` (UNIQUE on `scheduled_posts` per entry/channel). Crash before commit: no queue row. Crash after commit: same id, no second insert. That is **not** exactly-once toward X.
+Promote in the **same SQLite transaction** as `submitted → approved` (UNIQUE on `scheduled_posts` per entry/channel). Insert the queue row with `status='pending'` and phase-1 `channel='x'`. Crash before commit: no queue row. Crash after commit: same id, no second insert. That is **not** exactly-once toward X.
 
 `contentHash` = SHA-256(text NUL scheduledAt NUL imageBytes). `scheduledAt` is epoch ms. Past time at submit → 409.
 
@@ -159,7 +159,7 @@ Channel status: `pending | in-flight | sent | failed | uncertain`. `PublishResul
 - OAuth 2.0 user token against `api.x.com`.
 - Scopes: `tweet.write`, `users.read`, `offline.access`, plus media upload (`media.write` or the documented scope for chunked `POST /2/media/upload`).
 - `POST /2/tweets`; media chunked `POST /2/media/upload`; refresh `POST /2/oauth2/token`.
-- One refresh on HTTP 401, never a second. Failed refresh → `needs-login` alert, no loop.
+- One refresh on HTTP 401, never a second. Failed refresh **after dispatch** (tweet call already sent) → CAS `in-flight → uncertain` plus `needs-login` alert, no loop. Failed refresh **before dispatch** → `failed` (retry allowed).
 - No auto-retry after an accepted `POST /2/tweets`.
 - Boot probe: `GET /2/users/me` username, strip a leading `@` on **both** sides, compare to configured handle. Mismatch → `probes.x=bad`, no send.
 - Dev uses a **test** X account, not the brand account. Client id is config; client secret and refresh token are secrets.
@@ -209,7 +209,7 @@ SQLite WAL. Tables: drafts, bundles, entries, scheduled_posts, publish_results, 
 
 Phase 1: **one entry per bundle**. `GET`/`POST /review/:id` uses the bundle id.
 
-Bundles and scheduled_posts store `authoredByUser` + `authoredByAccount` (JWT `user` / `account` at submit). Entry state: `submitted | retracted | approved | rejected`. Submit creates `submitted`. Retract/decide are compare-and-set `WHERE state='submitted'` in `BEGIN IMMEDIATE`. Retract 409 unless every entry on the bundle is still `submitted`. `approved` writes `scheduled_posts` in the same transaction. `decidedByUser` / `decidedByAccount` only on approve/reject.
+Bundles and scheduled_posts store `authoredByUser` + `authoredByAccount` (JWT `user` / `account` at submit). Entry state: `submitted | retracted | approved | rejected`. Submit creates `submitted`. Retract/decide are compare-and-set `WHERE state='submitted'` in `BEGIN IMMEDIATE`. Retract 409 unless every entry on the bundle is still `submitted`. `approved` writes `scheduled_posts` with `status='pending'` and `channel='x'` in the same transaction. `decidedByUser` / `decidedByAccount` only on approve/reject.
 
 ---
 
