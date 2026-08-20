@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: read
+  # `write` is required because the release PR is opened with GITHUB_TOKEN.
   pull-requests: write
 
 concurrency:
@@ -31,7 +32,9 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          PR_COUNT=$(gh pr list --base main --head develop --state open --json number --jq 'length')
+          # Qualify the head as this repository's develop. `--head develop` alone
+          # can match a fork's develop and skip opening the in-repo release PR.
+          PR_COUNT=$(gh pr list --base main --head "${GITHUB_REPOSITORY}:develop" --state open --json number --jq 'length')
           echo "pr_exists=$([[ $PR_COUNT -gt 0 ]] && echo 'true' || echo 'false')" >> "$GITHUB_OUTPUT"
           echo "::notice::Open PRs from develop to main: $PR_COUNT"
 
@@ -47,6 +50,10 @@ jobs:
       - name: Create Release PR
         if: steps.check-pr.outputs.pr_exists == 'false' && steps.check-diff.outputs.has_changes == 'true'
         env:
+          # Opened by the Actions bot, not a person. GitHub does not start further
+          # workflows from GITHUB_TOKEN events; reviewers approve the held
+          # pull_request runs after the PR opens. That cost is accepted so the
+          # release PR is not tied to one person's token.
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           COMMIT_COUNT: ${{ steps.check-diff.outputs.commit_count }}
         run: |
