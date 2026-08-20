@@ -45,7 +45,7 @@ Mail login does **not** elevate Admin. Approvers stay on wallet sign-in.
 1. Magic link mints a staff JWT with `tfaRequired` and redirects to Outbox `/auth/callback?session=<jwt>`.
 2. Callback does **not** set a working cookie. It 302s to the existing DFX TOTP UI with `session` and `returnUrl` of Outbox `/auth/tfa-complete`. Both URLs must be on the DFX API redirect allowlist.
 3. TOTP UI calls `GET`/`POST /v1/auth/2fa` and `POST /v1/auth/2fa/verify`. Outbox does not rebuild TOTP.
-4. After success, TOTP UI 302s to `/auth/tfa-complete?session=<jwt>`. Outbox calls `GET /v1/auth/introspect/outbox` with Bearer. **200** → HttpOnly working cookie, query stripped. `403` with `tfaRequired` → TOTP UI again. Staff KYC failure (`verifiedName` missing) → hard error, **not** the TOTP UI. No working cookie without introspect 200.
+4. After success, TOTP UI 302s to `/auth/tfa-complete?session=<jwt>`. Outbox calls `GET /v1/auth/introspect/outbox` with Bearer. Introspect **200** means the DFX TFA interceptor already accepted completed TOTP — claim presence alone is not enough. Pre-verify magic-link JWTs get **403** `tfaRequired` and no working cookie. After 200: HttpOnly working cookie, query stripped. Staff KYC failure (`verifiedName` missing) → hard error, **not** the TOTP UI.
 
 **Approver login**
 
@@ -59,7 +59,7 @@ Browser/SSR uses the cookie. Outbox always sends `Authorization: Bearer` to the 
 - `hasRoleAccess(entryRole, payload.role)` with the DFX hierarchy. Compose/submit: `OUTBOX`. Decide/retry/resolve: `ADMIN`. Admin/SuperAdmin may compose (additionalRoles).
 - Audit uses JWT `user` and `account`, never a typed email.
 - Introspect **every** authenticated route (HTML GET, API, mutations).
-  - `GET /v1/auth/introspect/outbox`: `RoleGuard(OUTBOX)` (Admin via additionalRoles). If `payload.role === OUTBOX`, require claim `tfaRequired` (reject wallet-Outbox). Admin/SuperAdmin on this route without that claim is allowed.
+  - `GET /v1/auth/introspect/outbox`: `RoleGuard(OUTBOX)` (Admin via additionalRoles). If `payload.role === OUTBOX`: mail-origin claim `tfaRequired` **and** the DFX TFA interceptor must have passed (completed TOTP). Wallet-Outbox tokens → 403. A pre-verify magic-link JWT still carries the claim but introspect stays 403 until `2fa/verify`. Admin/SuperAdmin on this route without that claim is allowed.
   - `GET /v1/auth/introspect/admin`: `RoleGuard(ADMIN)`, no `tfaRequired`. Never run dual-visibility GETs through the admin introspect (composers would 403).
 - Health endpoints have no JWT.
 
@@ -78,7 +78,7 @@ One process, one image: HTTP (composer + API) plus a ticker.
 | Approval | GET: Admin sees all first, else Outbox sees own (`authoredBy.account === payload.account`). POST decide is Admin only. Promote to the queue **only** on `approve`. |
 | Scheduler | One global queue, X publisher, honest status, failure alerts |
 
-Node 22, no frontend bundler. SQLite WAL on a named volume.
+Node 22, no frontend bundler. SQLite WAL on durable storage.
 
 ### Composer (phase 1)
 
@@ -145,12 +145,12 @@ SIGTERM: ticker stops, waits for `runningId`. Boot: interrupted in-flight channe
 
 **Composer (OUTBOX, authoredBy):**
 
-- `POST /api/bundles/:id/retract` only `submitted → retracted` (`WHERE state='submitted'`). After `approved` / `rejected` / `retracted` → 409. Channel `pending` is not retractable.
+- `POST /api/bundles/:id/retract` — Phase 1 is **one entry per bundle**. Retract 409 unless **every** entry on the bundle is still `submitted`. Then CAS all of them `submitted → retracted` in one transaction. Channel `pending` is not retractable.
 
 **Approver (ADMIN):**
 
 - `POST /api/posts/:id/retry` — `BEGIN IMMEDIATE` + `UPDATE … WHERE id=? AND status='failed'` → `pending`, audit, **no** synchronous X call. 0 rows → 409. Ticker takes due.
-- `POST /api/posts/:id/resolve-uncertain` — `{ channel, resolution: "sent"|"failed", url? }`. Atomic `WHERE status='uncertain'`; other source → 409.
+- `POST /api/posts/:id/resolve-uncertain` — `{ resolution: "sent"|"failed", url? }`. Channel comes from the row. CAS `WHERE id=? AND status='uncertain'`; else 409.
 
 Channel status: `pending | in-flight | sent | failed | uncertain`. `PublishResult.ok` is a JSON boolean, not the status.
 
@@ -180,9 +180,7 @@ Blocking: forbidden claims, MiCAR-unsafe, provisional without qualifier. Hints: 
 { "ok": bool, "queueRunning": bool, "probes": { "x": "ok"|"bad", "jwt": "ok"|"bad" } }
 ```
 
-`ok` is true only when every probe is ok. `x=bad`: users/me mismatch. `jwt=bad` only when the JWT secret is unset (not a drift detector). Docker HEALTHCHECK fails when `ok !== true`.
-
-Process bind: `0.0.0.0:4100`.
+`ok` is true only when every probe is ok. `x=bad`: users/me mismatch. `jwt=bad` only when the JWT secret is unset (not a drift detector).
 
 | Route | Role | Effect |
 |---|---|---|
@@ -191,11 +189,11 @@ Process bind: `0.0.0.0:4100`.
 | `POST /api/review` | OUTBOX | findings |
 | `POST /api/submit` | OUTBOX | bundle; 409 on blocking / past time / bad image |
 | `GET /api/posts` | Admin → all; else Outbox → `authoredBy.account === payload.account`; else 403 | status list |
-| `POST /api/bundles/:id/retract` | OUTBOX, authoredBy | atomic `submitted → retracted`; else 409 |
-| `GET /review/:id` | same visibility as `GET /api/posts` | GET, no side effect; no token in the query |
-| `POST /review/:id/decide` | ADMIN | `{ entryPostIds, decision: "approve"\|"reject" }`. CAS `submitted → approved\|rejected`. Queue insert **only** on `approve`, same transaction, one row per entry/channel. Retract vs decide: one winner. Repeat 409. |
-| `POST /api/posts/:id/retry` | ADMIN | CAS `WHERE status='failed'` → `pending`; else 409 |
-| `POST /api/posts/:id/resolve-uncertain` | ADMIN | CAS `uncertain → sent\|failed`; else 409 |
+| `POST /api/bundles/:id/retract` | OUTBOX, authoredBy | Phase 1: one entry per bundle. 409 unless every entry is `submitted`; then CAS all to `retracted` |
+| `GET /review/:id` | same visibility as `GET /api/posts` | `:id` is the **bundle** id. GET, no side effect; no token in the query |
+| `POST /review/:id/decide` | ADMIN | `:id` is the bundle id. Body `{ decision: "approve"\|"reject" }` for that bundle's single entry (phase 1). CAS `submitted → approved\|rejected`. Queue insert **only** on `approve`, same transaction. Retract vs decide: one winner. Repeat 409. |
+| `POST /api/posts/:id/retry` | ADMIN | CAS `WHERE id=? AND status='failed'` → `pending`; else 409 |
+| `POST /api/posts/:id/resolve-uncertain` | ADMIN | `{ resolution: "sent"\|"failed", url? }`. CAS `WHERE id=? AND status='uncertain'`; else 409 |
 
 No `/api/publish`, `/api/schedule`, `/now`.
 
@@ -209,7 +207,9 @@ Logs: denylist `Authorization`, Cookie, Bearer. No JWT in HTML.
 
 SQLite WAL. Tables: drafts, bundles, entries, scheduled_posts, publish_results, audit, media.
 
-Bundles and scheduled_posts store `authoredByUser` + `authoredByAccount` (JWT `user` / `account` at submit). Entry state: `submitted | retracted | approved | rejected`. Submit creates `submitted`. Retract/decide are compare-and-set `WHERE state='submitted'` in `BEGIN IMMEDIATE`. `approved` writes `scheduled_posts` in the same transaction. `decidedByUser` / `decidedByAccount` only on approve/reject.
+Phase 1: **one entry per bundle**. `GET`/`POST /review/:id` uses the bundle id.
+
+Bundles and scheduled_posts store `authoredByUser` + `authoredByAccount` (JWT `user` / `account` at submit). Entry state: `submitted | retracted | approved | rejected`. Submit creates `submitted`. Retract/decide are compare-and-set `WHERE state='submitted'` in `BEGIN IMMEDIATE`. Retract 409 unless every entry on the bundle is still `submitted`. `approved` writes `scheduled_posts` in the same transaction. `decidedByUser` / `decidedByAccount` only on approve/reject.
 
 ---
 
@@ -219,7 +219,7 @@ Bundles and scheduled_posts store `authoredByUser` + `authoredByAccount` (JWT `u
 |---|---|
 | Stolen JWT | HS256; short TTL; introspect on every authenticated route |
 | Wrong role | `hasRoleAccess`; ACCOUNT token is not enough |
-| Outbox without TOTP | `tfaRequired` required when `payload.role === OUTBOX` |
+| Outbox without TOTP | mail-origin `tfaRequired` **and** DFX TFA interceptor 200 (completed TOTP). Claim presence alone is not enough. |
 | Publish without approval | no endpoint; no DOM control; tests |
 | Double post on X | no auto-retry after accepted tweet; retry only `failed`; `uncertain` not requeued |
 | Token in logs | denylist |
@@ -248,8 +248,8 @@ Bundles and scheduled_posts store `authoredByUser` + `authoredByAccount` (JWT `u
 | A1 | Scaffold, `content/dfx/`, review engine, status types, CI |
 | A2 | SSR composer, cookie/Bearer = DFX JWT, submit/approve, **no** publish-now |
 | A3 | X publisher, serial queue, retry/resolve, boot probe, SIGTERM |
-| A-img | Dockerfile, image digest before deploy |
-| A4 | Gates: queue only via Admin decide; GET without mutation; empty X OAuth → healthz 200 `ok:false`; Outbox compose without `tfaRequired` → 403; retry only `failed` |
+| A-img | Dockerfile |
+| A4 | Gates: queue only via Admin decide; GET without mutation; empty X OAuth → healthz 200 `ok:false`; Outbox compose until introspect 200 (TOTP completed) → 403; retry only `failed` |
 
 Deploy compose, secrets, and monitors are **not** this repository.
 
