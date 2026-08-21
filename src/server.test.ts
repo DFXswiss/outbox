@@ -76,7 +76,12 @@ function closeServer(server: Server): Promise<void> {
 }
 
 async function start(
-  opts: { pack?: boolean; jwtSecret?: string; probeX?: () => 'ok' | 'bad' } = {}
+  opts: {
+    pack?: boolean
+    jwtSecret?: string
+    probeX?: () => 'ok' | 'bad'
+    introspect?: Introspect
+  } = {}
 ): Promise<Harness> {
   const dir = mkdtempSync(join(tmpdir(), 'outbox-surface-'))
   const db = openDatabase(join(dir, 'state.sqlite'))
@@ -100,7 +105,7 @@ async function start(
   const server = createOutboxServer({
     db,
     packRoot,
-    introspect,
+    introspect: opts.introspect ?? introspect,
     now: () => clock.now,
     jwtSecret: opts.jwtSecret ?? 'test-jwt-secret',
     log: (line) => logs.push(line),
@@ -205,6 +210,20 @@ function expectReviewScopeMeaning(text: string): void {
 }
 
 describe('POST /api/submit', () => {
+  it('rejects a JSON field that is not a string and writes no entry', async () => {
+    const h = await start()
+    const res = await call(h.port, '/api/submit', {
+      method: 'POST',
+      token: TOKEN_A,
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ text: { x: 1 }, scheduledAt: FUTURE_LOCAL })
+    })
+    expect(res.status).toBe(400)
+    expect(res.json).toMatchObject({ ok: false, reason: 'invalid-request' })
+    expect(res.text).toContain('JSON fields must be strings.')
+    expect(entryCount(h.db)).toBe(0)
+  })
+
   it('returns 409 and writes no entry when a blocking finding is present', async () => {
     const h = await start()
     const res = await submitJson(h.port, TOKEN_A, { text: BLOCKING, scheduledAt: FUTURE_LOCAL })
@@ -305,6 +324,30 @@ describe('GET /review/:id', () => {
 })
 
 describe('POST /review/:id/decide', () => {
+  it('does not approve when introspect returns OUTBOX for an ADMIN route', async () => {
+    const permissive: Introspect = async (token) => {
+      const person = PEOPLE[token]
+      if (!person) return { ok: false, status: 401 }
+      return { ok: true, user: person.user, account: person.account, role: 'OUTBOX' }
+    }
+    const h = await start({ introspect: permissive })
+    const created = (await submitJson(h.port, TOKEN_A, { text: CLEAN, scheduledAt: FUTURE_LOCAL }))
+      .json as { bundleId: string; entryId: string }
+
+    const res = await call(h.port, `/review/${created.bundleId}/decide`, {
+      method: 'POST',
+      token: TOKEN_A,
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ decision: 'approve' })
+    })
+    expect(res.status).toBe(403)
+    expect(queueFor(h.db, created.entryId)).toEqual([])
+    const row = h.db
+      .prepare('SELECT state FROM entries WHERE id = ?')
+      .get(created.entryId) as { state: string }
+    expect(row.state).toBe('submitted')
+  })
+
   it('approve as Admin inserts a queue row; as OUTBOX it is 403', async () => {
     const h = await start()
     const created = (await submitJson(h.port, TOKEN_A, { text: CLEAN, scheduledAt: FUTURE_LOCAL }))
@@ -501,6 +544,25 @@ describe('log denylist', () => {
     expect(joined).not.toContain(SEKRIT_COOKIE)
     expect(joined).not.toMatch(/Bearer\s+(?!(\*\*\*))/i)
   })
+
+  it('masks the session cookie when it is not the first cookie in the header', async () => {
+    const h = await start()
+    const res = await call(h.port, '/api/submit', {
+      method: 'POST',
+      origin: `http://127.0.0.1:${h.port}`,
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${TOKEN_A}`,
+        cookie: `cf_clearance=abc; outbox=${SEKRIT_COOKIE}; extra=1`
+      },
+      body: JSON.stringify({ text: CLEAN, scheduledAt: FUTURE_LOCAL })
+    })
+    expect(res.status).toBe(200)
+    const joined = h.logs.join('\n')
+    expect(joined).toContain('Cookie:')
+    expect(joined).not.toContain(SEKRIT_COOKIE)
+    expect(joined).not.toContain('outbox=')
+  })
 })
 
 describe('POST /api/bundles/:id/retract', () => {
@@ -568,6 +630,71 @@ describe('healthz probes', () => {
       queueRunning: false,
       probes: { x: 'bad', jwt: 'ok' }
     })
+  })
+
+  it('reports ok false and probes.jwt bad when the JWT secret is unset', async () => {
+    const h = await start({ probeX: () => 'ok', jwtSecret: '' })
+    const health = await call(h.port, '/healthz')
+    expect(health.status).toBe(200)
+    expect(health.json).toMatchObject({
+      ok: false,
+      queueRunning: false,
+      probes: { x: 'ok', jwt: 'bad' }
+    })
+  })
+
+  it('reports ok false when the pack is missing and the other probes are ok', async () => {
+    const h = await start({ pack: false, probeX: () => 'ok' })
+    const health = await call(h.port, '/healthz')
+    expect(health.status).toBe(200)
+    expect(health.json).toEqual({
+      ok: false,
+      queueRunning: false,
+      probes: { x: 'ok', jwt: 'ok' }
+    })
+  })
+})
+
+describe('GET /api/me', () => {
+  it('returns account, user, and role from the identity', async () => {
+    const h = await start()
+    const res = await call(h.port, '/api/me', { token: TOKEN_A })
+    expect(res.status).toBe(200)
+    expect(res.json).toEqual({
+      account: 'account-a',
+      user: 'user-a',
+      role: 'OUTBOX'
+    })
+  })
+})
+
+describe('POST /api/review', () => {
+  it('returns findings and writes no entry', async () => {
+    const h = await start()
+    const res = await call(h.port, '/api/review', {
+      method: 'POST',
+      token: TOKEN_A,
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ text: BLOCKING })
+    })
+    expect(res.status).toBe(200)
+    expect(res.json).toEqual({
+      ok: true,
+      blocking: ['Forbidden claim: trustless'],
+      hints: []
+    })
+    expect(entryCount(h.db)).toBe(0)
+  })
+})
+
+describe('unreadable cookie', () => {
+  it('returns 401 rather than 500 when the session cookie cannot be decoded', async () => {
+    const h = await start()
+    const res = await call(h.port, '/', {
+      headers: { cookie: 'outbox=%' }
+    })
+    expect(res.status).toBe(401)
+    expect(res.text).not.toContain('Internal error.')
   })
 })
 

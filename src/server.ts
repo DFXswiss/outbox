@@ -19,7 +19,7 @@ import {
   renderPlainPage,
   renderReviewPage
 } from './html'
-import type { Identity, Introspect, Role } from './identity'
+import { hasRoleAccess, type Identity, type Introspect, type Role } from './identity'
 import { createLog } from './log'
 import { formatZurich, parseZurichDateTime } from './time'
 
@@ -116,7 +116,13 @@ function readCookie(req: IncomingMessage, name: string): string | null {
   if (!header) return null
   for (const part of header.split(';')) {
     const [key, ...rest] = part.trim().split('=')
-    if (key === name) return decodeURIComponent(rest.join('='))
+    if (key === name) {
+      try {
+        return decodeURIComponent(rest.join('='))
+      } catch {
+        return null
+      }
+    }
   }
   return null
 }
@@ -192,8 +198,11 @@ async function parseFields(
     }
     const fields: Record<string, string> = {}
     for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
-      if (value === undefined || value === null) continue
-      fields[key] = typeof value === 'string' ? value : String(value)
+      if (value === undefined) continue
+      if (typeof value !== 'string') {
+        return { ok: false, status: 400, message: 'JSON fields must be strings.' }
+      }
+      fields[key] = value
     }
     return { ok: true, fields }
   }
@@ -240,6 +249,7 @@ export function createOutboxServer(deps: OutboxServerDeps): Server {
     if (presented === null) return { ok: false, status: 401 }
     const result = await deps.introspect(presented.token, role)
     if (!result.ok) return { ok: false, status: result.status }
+    if (!hasRoleAccess(role, result.role)) return { ok: false, status: 403 }
     return { ok: true, identity: result, token: presented.token, via: presented.via }
   }
 
@@ -324,6 +334,20 @@ export function createOutboxServer(deps: OutboxServerDeps): Server {
       return
     }
 
+    if (method === 'GET' && pathname === '/api/me') {
+      const auth = await authenticate(req, 'OUTBOX')
+      if (!auth.ok) {
+        fail(res, req, pathname, auth.status, 'auth-failed', 'Sign in required.')
+        return
+      }
+      sendJson(res, 200, {
+        account: auth.identity.account,
+        user: auth.identity.user,
+        role: auth.identity.role
+      })
+      return
+    }
+
     if (method === 'GET' && pathname === '/api/posts') {
       const auth = await authenticate(req, 'OUTBOX')
       if (!auth.ok) {
@@ -387,9 +411,10 @@ export function createOutboxServer(deps: OutboxServerDeps): Server {
     }
 
     const submitPost = pathname === '/api/submit'
+    const reviewPost = pathname === '/api/review'
     const retractMatch = /^\/api\/bundles\/([^/]+)\/retract$/.exec(pathname)
     const decideMatch = /^\/review\/([^/]+)\/decide$/.exec(pathname)
-    if (!submitPost && !retractMatch && !decideMatch) {
+    if (!submitPost && !reviewPost && !retractMatch && !decideMatch) {
       await readBody(req)
       fail(res, req, pathname, 404, 'not-found', 'Not found.')
       return
@@ -405,6 +430,30 @@ export function createOutboxServer(deps: OutboxServerDeps): Server {
     if (auth.via === 'cookie' && !originMatchesHost(req)) {
       await readBody(req)
       refuseOrigin(res, req, auth.identity, wantsJson(req, pathname))
+      return
+    }
+
+    if (reviewPost) {
+      const parsed = await parseFields(req)
+      if (!parsed.ok) {
+        fail(res, req, pathname, parsed.status, 'invalid-request', parsed.message)
+        return
+      }
+      const text = parsed.fields.text ?? ''
+      if (text.trim() === '') {
+        fail(res, req, pathname, 400, 'invalid-request', 'Text is required.')
+        return
+      }
+      const reviewed = reviewText(deps.packRoot, brand, text)
+      if (!reviewed.ok) {
+        sendJson(res, 409, { ok: false, reason: 'missing-pack', detail: 'Review pack is missing.' })
+        return
+      }
+      sendJson(res, 200, {
+        ok: true,
+        blocking: reviewed.checks.blocking,
+        hints: reviewed.checks.hints ?? []
+      })
       return
     }
 

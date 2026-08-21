@@ -8,6 +8,16 @@ export type Identity = {
   role: Role
 }
 
+/**
+ * DFX hierarchy, not recursive. ADMIN fulfills OUTBOX; OUTBOX does not
+ * fulfill ADMIN. SUPER_ADMIN is mapped to ADMIN before this sees it.
+ */
+export function hasRoleAccess(needed: Role, actual: Role): boolean {
+  if (actual === needed) return true
+  if (needed === 'OUTBOX' && actual === 'ADMIN') return true
+  return false
+}
+
 export type IntrospectResult = ({ ok: true } & Identity) | { ok: false; status: number }
 
 /**

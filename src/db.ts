@@ -32,6 +32,8 @@ CREATE TABLE IF NOT EXISTS scheduled_posts (
   status TEXT NOT NULL,
   createdAt INTEGER NOT NULL,
   updatedAt INTEGER NOT NULL,
+  authoredByUser TEXT NOT NULL,
+  authoredByAccount TEXT NOT NULL,
   UNIQUE (entryId, channel)
 );
 

@@ -1,6 +1,6 @@
 const BEARER = /Bearer\s+\S+/gi
-const AUTHORIZATION = /(Authorization\s*[=:]\s*)\S+/gi
-const COOKIE = /(Cookie\s*[=:]\s*)\S+/gi
+const AUTHORIZATION = /(Authorization\s*[=:]\s*).+?(?=\s+Cookie\s*[=:]|$)/gi
+const COOKIE = /(Cookie\s*[=:]\s*).+/gi
 const SESSION_QUERY = /([?&]session=)[^&]*/gi
 
 /**

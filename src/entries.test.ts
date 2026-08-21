@@ -112,6 +112,29 @@ describe('approve and the send queue', () => {
     expect(entryState(created.entryId)).toBe('approved')
   })
 
+  it('the queue row carries the author, not the approver', () => {
+    const created = submit()
+    if (!created.ok) throw new Error('expected submit to succeed')
+
+    const result = decideEntry(db, {
+      entryId: created.entryId,
+      decision: 'approve',
+      actor: APPROVER,
+      now: NOW
+    })
+    expect(result).toEqual({ ok: true, state: 'approved' })
+    const row = db
+      .prepare(
+        'SELECT authoredByUser, authoredByAccount FROM scheduled_posts WHERE entryId = ?'
+      )
+      .get(created.entryId) as { authoredByUser: string; authoredByAccount: string }
+    expect(row).toEqual({
+      authoredByUser: ACTOR.user,
+      authoredByAccount: ACTOR.account
+    })
+    expect(row.authoredByUser).not.toBe(APPROVER.user)
+  })
+
   it('reject does not insert a queue row', () => {
     const created = submit()
     if (!created.ok) throw new Error('expected submit to succeed')
@@ -273,16 +296,20 @@ describe('scheduled_posts unique (entryId, channel)', () => {
     if (!created.ok) throw new Error('expected submit to succeed')
 
     db.prepare(
-      `INSERT INTO scheduled_posts (id, entryId, channel, status, createdAt, updatedAt)
-       VALUES (?, ?, 'x', 'pending', ?, ?)`
-    ).run('post-1', created.entryId, NOW, NOW)
+      `INSERT INTO scheduled_posts (
+         id, entryId, channel, status, createdAt, updatedAt,
+         authoredByUser, authoredByAccount
+       ) VALUES (?, ?, 'x', 'pending', ?, ?, ?, ?)`
+    ).run('post-1', created.entryId, NOW, NOW, ACTOR.user, ACTOR.account)
 
     let caught: unknown
     try {
       db.prepare(
-        `INSERT INTO scheduled_posts (id, entryId, channel, status, createdAt, updatedAt)
-         VALUES (?, ?, 'x', 'pending', ?, ?)`
-      ).run('post-2', created.entryId, NOW, NOW)
+        `INSERT INTO scheduled_posts (
+           id, entryId, channel, status, createdAt, updatedAt,
+           authoredByUser, authoredByAccount
+         ) VALUES (?, ?, 'x', 'pending', ?, ?, ?, ?)`
+      ).run('post-2', created.entryId, NOW, NOW, ACTOR.user, ACTOR.account)
     } catch (err) {
       caught = err
     }

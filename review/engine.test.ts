@@ -46,7 +46,7 @@ describe('loadTopicRules', () => {
       const loaded = loadTopicRules(root, topic)
       expect(loaded).not.toBeNull()
       expect(loaded?.topic).toBe(topic)
-      expect(loaded?.forbiddenClaims.length).toBeGreaterThan(0)
+      expect(loaded?.forbiddenClaims).toEqual(['\\btrustless\\b'])
       expect(loaded?.maxEmoji).toBe(3)
     } finally {
       rmSync(root, { recursive: true, force: true })

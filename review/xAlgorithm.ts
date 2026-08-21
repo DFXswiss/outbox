@@ -1,13 +1,10 @@
 /**
- * Automated checks derived from `content/x-algorithm-rules.md` (rules
- * approved 2026-08-15). Pure Node/TypeScript — no Electron or React imports,
- * same portability contract as the rest of `review/` (see `review/README.md`).
- * Deliberately does NOT import `ScheduledPost`/`ChannelId` from an
- * app-shell model module — that would break portability — so
- * callers pass a minimal, structurally-compatible shape instead.
+ * Spacing and media-reference helpers. Pure Node/TypeScript — no Electron
+ * or React imports, same portability contract as the rest of `review/`
+ * (see `review/README.md`). Callers pass id, profile, channel, and time.
  */
 
-/** Minimal shape a caller adapts a real ScheduledPost/campaign entry into. */
+/** One scheduled item: who posted, on which channel, and when. */
 export interface SpacingEntry {
   id: string
   profileId: string
@@ -15,10 +12,7 @@ export interface SpacingEntry {
   scheduledAt: number // epoch ms
 }
 
-/** Default spacing floor: a project judgment call, not a literal algorithm constant.
- * See rule 7 in `content/x-algorithm-rules.md` — the algorithm devalues repeat
- * same-author posts in a session but does not publish an hour threshold. 20h
- * comfortably allows a ~2-day cadence while catching same-day stacking. */
+/** Default spacing floor in hours between posts on the same profile and channel. */
 export const DEFAULT_MIN_HOURS_BETWEEN_POSTS = 20
 
 const MS_PER_HOUR = 60 * 60 * 1000

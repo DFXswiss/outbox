@@ -332,10 +332,23 @@ export function decideEntry(db: SqliteDatabase, input: DecideInput): DecideResul
       if (updated.changes !== 1) return refuseConflict()
 
       if (input.decision === 'approve') {
+        const author = db
+          .prepare('SELECT authoredByUser, authoredByAccount FROM bundles WHERE id = ?')
+          .get(entry.bundleId) as { authoredByUser: string; authoredByAccount: string }
         db.prepare(
-          `INSERT INTO scheduled_posts (id, entryId, channel, status, createdAt, updatedAt)
-           VALUES (?, ?, ?, 'pending', ?, ?)`
-        ).run(randomUUID(), input.entryId, QUEUE_CHANNEL, now, now)
+          `INSERT INTO scheduled_posts (
+             id, entryId, channel, status, createdAt, updatedAt,
+             authoredByUser, authoredByAccount
+           ) VALUES (?, ?, ?, 'pending', ?, ?, ?, ?)`
+        ).run(
+          randomUUID(),
+          input.entryId,
+          QUEUE_CHANNEL,
+          now,
+          now,
+          author.authoredByUser,
+          author.authoredByAccount
+        )
       }
 
       writeAudit(db, {
