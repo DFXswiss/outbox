@@ -227,7 +227,7 @@ function isVisible(identity: Identity, row: EntryView): boolean {
 export function createOutboxServer(deps: OutboxServerDeps): Server {
   const now = deps.now ?? (() => Date.now())
   const brand = deps.brand ?? DEFAULT_BRAND
-  const log = createLog(deps.log ?? ((line) => console.log(line)))
+  const log = createLog(deps.log ?? ((line) => process.stdout.write(line + '\n')))
 
   async function authenticate(
     req: IncomingMessage,
@@ -317,8 +317,6 @@ export function createOutboxServer(deps: OutboxServerDeps): Server {
         renderComposerPage({
           text: '',
           scheduledAt: '',
-          blocking: [],
-          hints: [],
           charCount: 0,
           costHint: costHint('')
         })
@@ -375,8 +373,7 @@ export function createOutboxServer(deps: OutboxServerDeps): Server {
           text: row.text,
           scheduledLabel: formatZurich(row.scheduledAt),
           state: row.state,
-          blocking: recorded?.blocking ?? [],
-          hints: recorded?.hints ?? [],
+          recorded,
           lockReason,
           approver: auth.identity.role === 'ADMIN'
         })
@@ -451,8 +448,7 @@ export function createOutboxServer(deps: OutboxServerDeps): Server {
             text,
             scheduledAt: scheduledRaw,
             error: 'Review pack is missing.',
-            blocking: [],
-            hints: [],
+            recorded: null,
             charCount: characterCount(text),
             costHint: costHint(text)
           })
@@ -485,8 +481,7 @@ export function createOutboxServer(deps: OutboxServerDeps): Server {
             text,
             scheduledAt: scheduledRaw,
             error: 'Blocking review finding.',
-            blocking: reviewed.checks.blocking,
-            hints: reviewed.checks.hints ?? [],
+            recorded: reviewed.checks,
             charCount: characterCount(text),
             costHint: costHint(text)
           })
@@ -514,8 +509,7 @@ export function createOutboxServer(deps: OutboxServerDeps): Server {
             text,
             scheduledAt: scheduledRaw,
             error: detail,
-            blocking: reviewed.checks.blocking,
-            hints: reviewed.checks.hints ?? [],
+            recorded: reviewed.checks,
             charCount: characterCount(text),
             costHint: costHint(text)
           })

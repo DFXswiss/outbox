@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { openDatabase, type SqliteDatabase } from './db'
+import { submitSubmission } from './entries'
 import { REVIEW_SCOPE } from './findings'
 import type { Identity, Introspect } from './identity'
 import { createOutboxServer, sessionCookie } from './server'
@@ -235,6 +236,22 @@ describe('POST /api/submit', () => {
     })
   })
 
+  it('does not present a missing pack as an empty review result', async () => {
+    const h = await start({ pack: false })
+    const res = await call(h.port, '/api/submit', {
+      method: 'POST',
+      token: TOKEN_A,
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ text: CLEAN, scheduledAt: FUTURE_LOCAL }).toString()
+    })
+    expect(res.status).toBe(409)
+    expect(res.text).toContain('No usable review check is recorded.')
+    expect(res.text).not.toContain('No blocking findings and no hints.')
+    expect(res.text).toContain('Review pack is missing.')
+    expectReviewScopeMeaning(res.text)
+    expect(entryCount(h.db)).toBe(0)
+  })
+
   it('creates a submitted entry that is visible on GET /review/:id', async () => {
     const h = await start()
     const form = await call(h.port, '/api/submit', {
@@ -261,6 +278,29 @@ describe('POST /api/submit', () => {
     expectReviewScopeMeaning(page.text)
     expect(page.text).toContain('Europe/Zurich')
     expect(page.text).not.toContain(TOKEN_A)
+  })
+})
+
+describe('GET /review/:id', () => {
+  it('does not present a missing check as an empty review result', async () => {
+    const h = await start()
+    const created = submitSubmission(h.db, {
+      text: CLEAN,
+      scheduledAt: SUMMER_EPOCH,
+      checks: null,
+      actor: { user: 'user-a', account: 'account-a' },
+      now: NOW
+    })
+    if (!created.ok) throw new Error('expected submit to succeed')
+
+    const page = await call(h.port, `/review/${created.bundleId}`, { token: TOKEN_ADMIN })
+    expect(page.status).toBe(200)
+    expect(page.text).toContain('No usable review check is recorded.')
+    expect(page.text).not.toContain('No blocking findings and no hints.')
+    expectReviewScopeMeaning(page.text)
+    expect(page.text).toContain(
+      'No review check is recorded, so this entry cannot be approved.'
+    )
   })
 })
 

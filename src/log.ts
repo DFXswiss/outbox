@@ -15,7 +15,10 @@ export function redactSecrets(text: string): string {
     .replace(SESSION_QUERY, '$1***')
 }
 
-export function createLog(write: (line: string) => void = (line) => console.log(line)) {
+/** Default sink: one redacted line to stdout. Override via `write`. Redaction runs first. */
+export function createLog(
+  write: (line: string) => void = (line) => process.stdout.write(line + '\n')
+) {
   return (line: string): void => {
     write(redactSecrets(line))
   }

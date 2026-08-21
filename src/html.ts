@@ -1,3 +1,4 @@
+import type { EntryChecks } from './entries'
 import { REVIEW_SCOPE } from './findings'
 
 export function escapeHtml(value: string): string {
@@ -43,10 +44,21 @@ function page(title: string, body: string): string {
   return `<!doctype html><html lang="en"><head>${HEAD}<title>${escapeHtml(title)}</title></head><body>${body}</body></html>`
 }
 
-function renderFindings(blocking: string[], hints: string[]): string {
+function renderChecks(recorded: EntryChecks | null | undefined): string {
+  if (recorded === undefined) {
+    return `<div class="checks"><p class="scope">${escapeHtml(REVIEW_SCOPE)}</p></div>`
+  }
+  if (recorded === null) {
+    return (
+      `<div class="checks">` +
+      `<div class="blocked">No usable review check is recorded.</div>` +
+      `<p class="scope">${escapeHtml(REVIEW_SCOPE)}</p>` +
+      `</div>`
+    )
+  }
   const lines = [
-    ...blocking.map((line) => `<div class="blocked">${escapeHtml(line)}</div>`),
-    ...hints.map((line) => `<div class="hint">${escapeHtml(line)}</div>`)
+    ...recorded.blocking.map((line) => `<div class="blocked">${escapeHtml(line)}</div>`),
+    ...(recorded.hints ?? []).map((line) => `<div class="hint">${escapeHtml(line)}</div>`)
   ]
   if (lines.length === 0) {
     lines.push('<div>No blocking findings and no hints.</div>')
@@ -63,8 +75,8 @@ export type ComposerPageInput = {
   text: string
   scheduledAt: string
   error?: string
-  blocking: string[]
-  hints: string[]
+  /** Omit on a blank form. null is "no usable check", not an empty result. */
+  recorded?: EntryChecks | null
   charCount: number
   costHint: string
 }
@@ -73,10 +85,7 @@ export function renderComposerPage(input: ComposerPageInput): string {
   const error = input.error
     ? `<div class="error">${escapeHtml(input.error)}</div>`
     : ''
-  const findings =
-    input.error || input.blocking.length > 0 || input.hints.length > 0
-      ? renderFindings(input.blocking, input.hints)
-      : `<div class="checks"><p class="scope">${escapeHtml(REVIEW_SCOPE)}</p></div>`
+  const findings = renderChecks(input.recorded)
   const body = `
 <h1>Outbox</h1>
 <p class="meta">Submit for approval. There is no publish or schedule action without an approver.</p>
@@ -101,8 +110,8 @@ export type ReviewPageInput = {
   text: string
   scheduledLabel: string
   state: string
-  blocking: string[]
-  hints: string[]
+  /** null is "no usable check", not an empty result. */
+  recorded: EntryChecks | null
   lockReason: string | null
   approver: boolean
 }
@@ -126,7 +135,7 @@ export function renderReviewPage(input: ReviewPageInput): string {
 <p class="meta"><span class="state">${escapeHtml(input.state)}</span> · ${escapeHtml(input.scheduledLabel)}</p>
 ${lock}
 <div class="preview"><div class="text">${escapeHtml(input.text)}</div></div>
-${renderFindings(input.blocking, input.hints)}
+${renderChecks(input.recorded)}
 ${actions}`
   return page('Review', body)
 }
