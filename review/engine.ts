@@ -68,10 +68,17 @@ export function checkProvisionalQualifier(
   const missing: string[] = []
   let parameterEntryCount = 0
   for (const entry of entries) {
-    const combined = `${entry.postText}\n${cardText(entry)}`
-    if (!patterns.some((pattern) => pattern.test(combined))) continue
+    const sentences = [entry.postText, cardText(entry)].flatMap((text) =>
+      text.split(/(?<=[.!?])(?:\s+|$)|\n+/)
+    )
+    const parameterSentences = sentences.filter((sentence) =>
+      patterns.some((pattern) => pattern.test(sentence))
+    )
+    if (parameterSentences.length === 0) continue
     parameterEntryCount += 1
-    if (!/provisional/i.test(combined)) missing.push(entry.id)
+    if (parameterSentences.some((sentence) => !/provisional/i.test(sentence))) {
+      missing.push(entry.id)
+    }
   }
   return { missing, parameterEntryCount }
 }

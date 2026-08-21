@@ -100,6 +100,38 @@ describe('checkForbiddenClaims', () => {
 describe('checkProvisionalQualifier', () => {
   const topicRules = rules({ provisionalParameters: ['\\b2016\\b'] })
 
+  it('accepts a parameter qualified as provisional in the same sentence', () => {
+    expect(
+      checkProvisionalQualifier(
+        [entry('qualified', 'The provisional confirmation depth is 2016 blocks.')],
+        topicRules
+      )
+    ).toEqual({ missing: [], parameterEntryCount: 1 })
+  })
+
+  it('flags a parameter when provisional appears only in another sentence', () => {
+    expect(
+      checkProvisionalQualifier(
+        [entry('unqualified', 'The confirmation depth is 2016 blocks. Fees remain provisional.')],
+        topicRules
+      )
+    ).toEqual({ missing: ['unqualified'], parameterEntryCount: 1 })
+  })
+
+  it('flags two occurrences when only one is qualified in its sentence', () => {
+    expect(
+      checkProvisionalQualifier(
+        [
+          entry(
+            'partly-qualified',
+            'The provisional confirmation depth is 2016 blocks. Settlement waits for 2016 blocks.'
+          )
+        ],
+        topicRules
+      )
+    ).toEqual({ missing: ['partly-qualified'], parameterEntryCount: 1 })
+  })
+
   it('flags a parameter without the qualifier in post text or card params', () => {
     expect(
       checkProvisionalQualifier(

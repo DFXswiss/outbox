@@ -72,17 +72,19 @@ function roleFromPayload(value: unknown): Role | null {
 export type HttpIntrospectOptions = {
   baseUrl: string
   jwtSecret?: string
+  fetch?: typeof fetch
 }
 
 /**
  * The one network adapter for identity. Calls
  * `GET /v1/auth/introspect/outbox` or `/admin` with `Authorization: Bearer`.
- * Untested here on purpose: tests inject a fixed `Introspect` and must not
- * reach a network.
+ * Tests inject fetch so they exercise this adapter without reaching a network.
  */
 export function createHttpIntrospect(options: HttpIntrospectOptions): Introspect {
   const root = options.baseUrl.replace(/\/$/, '')
+  const fetchImpl = options.fetch ?? fetch
   return async (token, role) => {
+    let verifiedClaims: ReturnType<typeof decodeJwtHs256> = null
     if (options.jwtSecret !== undefined && options.jwtSecret !== '') {
       const claims = decodeJwtHs256(token, options.jwtSecret)
       if (
@@ -96,13 +98,14 @@ export function createHttpIntrospect(options: HttpIntrospectOptions): Introspect
       ) {
         return { ok: false, status: 401 }
       }
+      verifiedClaims = claims
     }
 
     const path =
       role === 'ADMIN' ? '/v1/auth/introspect/admin' : '/v1/auth/introspect/outbox'
     let response: { status: number; json: () => Promise<unknown> }
     try {
-      response = await fetch(`${root}${path}`, {
+      response = await fetchImpl(`${root}${path}`, {
         headers: { Authorization: `Bearer ${token}` },
         redirect: 'manual'
       })
@@ -124,6 +127,13 @@ export function createHttpIntrospect(options: HttpIntrospectOptions): Introspect
     }
     const rec = body as Record<string, unknown>
     if (typeof rec.user !== 'string' || typeof rec.account !== 'string') {
+      return { ok: false, status: 502 }
+    }
+    if (
+      verifiedClaims !== null &&
+      (rec.user !== verifiedClaims.user || rec.account !== verifiedClaims.account)
+    ) {
+      // A signed request and a conflicting upstream identity are a bad gateway response, not denial.
       return { ok: false, status: 502 }
     }
     const roleName = roleFromPayload(rec.role)
