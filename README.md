@@ -180,7 +180,7 @@ Blocking: forbidden claims, MiCAR-unsafe, provisional without qualifier. Hints: 
 { "ok": bool, "queueRunning": bool, "probes": { "x": "ok"|"bad", "jwt": "ok"|"bad" } }
 ```
 
-`ok` is true only when every probe is ok. `x=bad`: users/me mismatch. `jwt=bad` only when the JWT secret is unset (not a drift detector).
+`ok` is true only when every probe is ok. `x=bad`: the users/me probe failed or the handle does not match, or a refresh needed a new login. `jwt=bad` only when the JWT secret is unset (not a drift detector).
 
 | Route | Role | Effect |
 |---|---|---|

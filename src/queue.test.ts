@@ -155,6 +155,21 @@ describe('serial queue state transitions', () => {
         result,
         now: NOW + 2
       })).toEqual({ ok: false, reason: 'conflict' })
+      const pending = approved(NOW)
+      expect(finishPost(db, {
+        postId: pending.id,
+        result,
+        now: NOW + 2
+      })).toEqual({ ok: false, reason: 'conflict' })
+      expect(
+        db.prepare('SELECT status FROM scheduled_posts WHERE id = ?')
+          .get(pending.id)
+      ).toEqual({ status: 'pending' })
+      expect(
+        db.prepare(
+          'SELECT COUNT(*) AS n FROM publish_results WHERE scheduledPostId = ?'
+        ).get(pending.id)
+      ).toEqual({ n: 0 })
       if (status === 'sent') {
         expect(retryPost(db, {
           postId: post.id,
@@ -173,6 +188,15 @@ describe('serial queue state transitions', () => {
       result: { channel: 'x', ok: false, error: 'bad request' },
       now: NOW
     })
+    expect(resolveUncertain(db, {
+      postId: failed.id,
+      resolution: 'sent',
+      actor: ADMIN,
+      now: NOW + 1
+    })).toEqual({ ok: false, reason: 'conflict' })
+    expect(
+      db.prepare('SELECT status FROM scheduled_posts WHERE id = ?').get(failed.id)
+    ).toEqual({ status: 'failed' })
     expect(retryPost(db, {
       postId: failed.id,
       actor: ADMIN,
@@ -183,7 +207,24 @@ describe('serial queue state transitions', () => {
       actor: ADMIN,
       now: NOW + 2
     })).toEqual({ ok: false, reason: 'conflict' })
+    expect(resolveUncertain(db, {
+      postId: failed.id,
+      resolution: 'sent',
+      actor: ADMIN,
+      now: NOW + 2
+    })).toEqual({ ok: false, reason: 'conflict' })
+    expect(
+      db.prepare('SELECT status FROM scheduled_posts WHERE id = ?').get(failed.id)
+    ).toEqual({ status: 'pending' })
     db.prepare("UPDATE scheduled_posts SET status = 'sent' WHERE id = ?").run(failed.id)
+    expect(retryPost(db, {
+      postId: failed.id,
+      actor: ADMIN,
+      now: NOW + 3
+    })).toEqual({ ok: false, reason: 'conflict' })
+    expect(
+      db.prepare('SELECT status FROM scheduled_posts WHERE id = ?').get(failed.id)
+    ).toEqual({ status: 'sent' })
 
     const uncertain = approved(NOW)
     claimNextDue(db, NOW)

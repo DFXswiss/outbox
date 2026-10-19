@@ -26,12 +26,15 @@ function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status })
 }
 
-function client(fetch: typeof globalThis.fetch, options: { secret?: string; now?: () => number } = {}) {
+function client(
+  fetch: typeof globalThis.fetch,
+  options: { secret?: string; now?: () => number; handle?: string } = {}
+) {
   return createXClient({
     db,
     clientId: 'test-client',
     ...(options.secret ? { clientSecret: options.secret } : {}),
-    handle: '@test_handle',
+    handle: options.handle ?? '@test_handle',
     apiBase: 'https://x.invalid',
     fetch,
     now: options.now ?? (() => NOW)
@@ -319,6 +322,14 @@ describe('X publisher client', () => {
   it('matches X usernames after removing one leading @ and reports mismatches as bad', async () => {
     const matching = client(async () => json({ data: { username: '@test_handle' } }))
     expect(await matching.probe()).toBe('ok')
+    const unprefixedResponse = client(async () => json({
+      data: { username: 'test_handle' }
+    }))
+    expect(await unprefixedResponse.probe()).toBe('ok')
+    const prefixedResponse = client(async () => json({
+      data: { username: '@test_handle' }
+    }), { handle: 'test_handle' })
+    expect(await prefixedResponse.probe()).toBe('ok')
     const mismatch = client(async () => json({ data: { username: 'someone-else' } }))
     expect(await mismatch.probe()).toBe('bad')
     const failing = client(async () => {
