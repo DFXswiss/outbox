@@ -54,8 +54,7 @@ function approved(scheduledAt = NOW + 1) {
 }
 
 describe('serial queue state transitions', () => {
-  it('claims only approved pending posts that are due, and a claimed row cannot be claimed twice', () => {
-    const due = approved(NOW)
+  it('does not claim posts that are not due, terminal, or unapproved', () => {
     const later = approved(NOW + 1)
     const failed = approved(NOW)
     const uncertain = approved(NOW)
@@ -69,8 +68,12 @@ describe('serial queue state transitions', () => {
         .get(unapproved.id) as { entryId: string }
     ).entryId
     db.prepare("UPDATE entries SET state = 'submitted' WHERE id = ?").run(unapprovedEntry)
-    expect(claimNextDue(db, NOW)?.postId).toBe(due.id)
     expect(claimNextDue(db, NOW)).toBeNull()
+    expect(
+      db.prepare(
+        "SELECT COUNT(*) AS n FROM scheduled_posts WHERE status = 'in-flight'"
+      ).get()
+    ).toEqual({ n: 0 })
     expect(
       (db.prepare('SELECT status FROM scheduled_posts WHERE id = ?')
         .get(later.id) as { status: string }).status
@@ -80,7 +83,7 @@ describe('serial queue state transitions', () => {
     ).toEqual({ status: 'failed' })
   })
 
-  it('allows only one in-flight claim and claims the next post after finish', () => {
+  it('does not claim a second post until the in-flight post finishes', () => {
     const firstPost = approved(NOW)
     const secondPost = approved(NOW)
     const firstClaim = claimNextDue(db, NOW)

@@ -776,6 +776,25 @@ describe('scheduled post recovery endpoints', () => {
       }
     )
     expect(badUrl.status).toBe(400)
+    const invalidUrls = [
+      'https://x.com/settings/security',
+      'https://x.com:444/a/status/1',
+      'https://user@x.com/a/status/1',
+      'https://user:password@x.com/a/status/1'
+    ]
+    for (const url of invalidUrls) {
+      const rejected = await call(
+        h.port,
+        `/api/posts/${uncertainId}/resolve-uncertain`,
+        {
+          method: 'POST',
+          token: TOKEN_ADMIN,
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ resolution: 'sent', url })
+        }
+      )
+      expect(rejected.status).toBe(400)
+    }
     const acceptedSubdomain = await call(
       h.port,
       `/api/posts/${uncertainId}/resolve-uncertain`,
@@ -785,11 +804,15 @@ describe('scheduled post recovery endpoints', () => {
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
           resolution: 'sent',
-          url: 'https://www.x.com/test_handle/status/1'
+          url: 'https://www.x.com/test/status/123?s=20'
         })
       }
     )
     expect(acceptedSubdomain.status).toBe(200)
+    expect(
+      h.db.prepare('SELECT url FROM scheduled_posts WHERE id = ?')
+        .get(uncertainId)
+    ).toEqual({ url: 'https://www.x.com/test/status/123' })
     const crossSite = await call(
       h.port,
       `/api/posts/${uncertainId}/resolve-uncertain`,
@@ -924,19 +947,17 @@ describe('scheduled post recovery endpoints', () => {
   it('shows channel state and admin recovery forms while GET leaves queue and audit unchanged', async () => {
     const h = await start()
     const postId = await queued(h, 'uncertain')
-    const counts = () => ({
-      posts: (
-        h.db.prepare('SELECT COUNT(*) AS n FROM scheduled_posts').get() as {
-          n: number
-        }
-      ).n,
+    const snapshot = () => ({
+      posts: h.db.prepare(
+        'SELECT id, status, url, updatedAt FROM scheduled_posts ORDER BY id'
+      ).all(),
       audit: (
         h.db.prepare('SELECT COUNT(*) AS n FROM audit').get() as {
           n: number
         }
       ).n
     })
-    const before = counts()
+    const before = snapshot()
     const list = await call(h.port, '/api/posts', { token: TOKEN_ADMIN })
     expect(list.text).toContain(
       `"channel":{"postId":"${postId}","channel":"x","status":"uncertain"`
@@ -951,7 +972,7 @@ describe('scheduled post recovery endpoints', () => {
     const composer = await call(h.port, `/review/${bundle.bundleId}`, { token: TOKEN_A })
     expect(composer.text).not.toContain('Mark as sent')
     expect(composer.text).not.toContain('Mark as failed')
-    expect(counts()).toEqual(before)
+    expect(snapshot()).toEqual(before)
   })
 
   it('creates scheduled posts only through the approve route', async () => {

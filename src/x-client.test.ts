@@ -120,7 +120,7 @@ describe('X publisher client', () => {
     expect(result.result.error).not.toContain('test-refresh-token')
   })
 
-  it('classifies a deadline between dispatch and fetch as failed', async () => {
+  it('does not send when the deadline expires before fetch is called', async () => {
     let clockCalls = 0
     let tweetRequests = 0
     const x = client(async (input) => {
@@ -159,7 +159,7 @@ describe('X publisher client', () => {
       if (url.endsWith('/2/oauth2/token')) {
         expect(headers.get('authorization')).toMatch(/^Basic /)
         return json({
-          access_token: 'test-access-token',
+          access_token: 'refreshed-access-token',
           refresh_token: 'rotated-refresh-token',
           expires_in: 7200
         })
@@ -183,7 +183,11 @@ describe('X publisher client', () => {
       'https://x.invalid/2/oauth2/token',
       'https://x.invalid/2/tweets'
     ])
-    expect(requests[2]?.authorization).toBe('Bearer test-access-token')
+    expect(requests.filter((request) => request.url.endsWith('/2/tweets'))
+      .map((request) => request.authorization)).toEqual([
+      'Bearer test-access-token',
+      'Bearer refreshed-access-token'
+    ])
   })
 
   it('does exactly one refresh after dispatch and classifies failed refresh as uncertain with needs-login', async () => {

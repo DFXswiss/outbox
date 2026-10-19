@@ -740,6 +740,7 @@ export function createOutboxServer(deps: OutboxServerDeps): Server {
         }
         const { resolution } = body.data
         const targetUrl = body.data.url?.trim() || undefined
+        let normalizedUrl: string | undefined
         if (resolution === 'failed' && targetUrl !== undefined) {
           fail(
             res,
@@ -768,6 +769,9 @@ export function createOutboxServer(deps: OutboxServerDeps): Server {
           }
           if (
             parsedUrl.protocol !== 'https:' ||
+            parsedUrl.username !== '' ||
+            parsedUrl.password !== '' ||
+            parsedUrl.port !== '' ||
             ![
               'x.com',
               'www.x.com',
@@ -776,7 +780,9 @@ export function createOutboxServer(deps: OutboxServerDeps): Server {
               'www.twitter.com',
               'mobile.twitter.com'
             ].includes(parsedUrl.hostname.toLowerCase()) ||
-            parsedUrl.pathname === '/'
+            !/^\/(?:[A-Za-z0-9_]{1,15}\/status\/\d+|i\/web\/status\/\d+)\/?$/.test(
+              parsedUrl.pathname
+            )
           ) {
             fail(
               res,
@@ -788,11 +794,12 @@ export function createOutboxServer(deps: OutboxServerDeps): Server {
             )
             return
           }
+          normalizedUrl = `${parsedUrl.origin}${parsedUrl.pathname}`
         }
         result = resolveUncertain(deps.db, {
           postId,
           resolution,
-          ...(targetUrl !== undefined ? { url: targetUrl } : {}),
+          ...(normalizedUrl !== undefined ? { url: normalizedUrl } : {}),
           actor: {
             user: auth.identity.user,
             account: auth.identity.account
