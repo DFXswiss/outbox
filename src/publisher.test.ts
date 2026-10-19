@@ -133,7 +133,7 @@ describe('serial publisher', () => {
   it('sends one approved due post and stores its permalink', async () => {
     const post = approve('approved text', NOW)
     let sends = 0
-    const { publisher } = harness(async () => {
+    const { publisher, alerts } = harness(async () => {
       sends += 1
       return {
         result: {
@@ -151,6 +151,7 @@ describe('serial publisher', () => {
       db.prepare('SELECT status, url FROM scheduled_posts WHERE id = ?')
         .get(post.id)
     ).toEqual({ status: 'sent', url: 'https://x.com/test/status/7' })
+    expect(alerts).toEqual([])
     await publisher.stop()
   })
 

@@ -147,6 +147,13 @@ describe('serial queue state transitions', () => {
         ).get(post.id) as { n: number }).n
       ).toBe(1)
       expect(db.prepare(
+        'SELECT ok, url, uncertain FROM publish_results WHERE scheduledPostId = ?'
+      ).get(post.id)).toEqual(status === 'sent'
+        ? { ok: 1, url: 'https://x.com/test/status/1', uncertain: 0 }
+        : status === 'uncertain'
+          ? { ok: 0, url: null, uncertain: 1 }
+          : { ok: 0, url: null, uncertain: 0 })
+      expect(db.prepare(
         `SELECT reason FROM audit WHERE event = 'published'
          AND entryId = (SELECT entryId FROM scheduled_posts WHERE id = ?)`
       ).get(post.id)).toEqual({ reason: status })
