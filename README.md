@@ -166,7 +166,7 @@ Channel status: `pending | in-flight | sent | failed | uncertain`. `PublishResul
 
 ### Brand pack
 
-Phase 1: **one** brand, X only. Default recommendation **DFX** (`@DFX_Swiss`). Pack at `content/dfx/` **in the image**. Missing `rules.json` → submit 409 and health `ok: false`.
+Phase 1: **one** brand, X only: **21 gifts**. The brand slug is configuration (`BRAND`), the pack lives at `content/<brand>/` **in the image**. `rules.json` is not part of this repository; the build adds it from a private source. Missing `rules.json` → submit 409 and health `ok: false`.
 
 Blocking: forbidden claims, MiCAR-unsafe, provisional without qualifier. Hints: emoji, sentence length, X character count. No LLM. Pack updates = new image.
 
@@ -259,7 +259,6 @@ Feature work lands on **develop** via pull request. A push to `develop` opens a 
 
 ## Open questions
 
-1. Phase-1 brand: default DFX (`@DFX_Swiss`). Alternative: zkCoins.
-2. Approvers without full Admin? Default no. If yes: a userData-id allowlist in the DFX API, not email.
+1. Approvers without full Admin? Default no. If yes: a userData-id allowlist in the DFX API, not email.
 
-Not open: role name (`UserRole.OUTBOX`), Access emails as login.
+Not open: phase-1 brand (21 gifts), role name (`UserRole.OUTBOX`), Access emails as login.
