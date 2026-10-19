@@ -675,6 +675,12 @@ describe('healthz probes', () => {
     const health = await call(h.port, '/healthz')
     expect(health.json).toMatchObject({ queueRunning: true })
   })
+
+  it('reports queueRunning false when an injected publisher is stopped', async () => {
+    const h = await start({ probeX: () => 'ok', publisher: { running: () => false } })
+    const health = await call(h.port, '/healthz')
+    expect(health.json).toMatchObject({ queueRunning: false })
+  })
 })
 
 describe('scheduled post recovery endpoints', () => {

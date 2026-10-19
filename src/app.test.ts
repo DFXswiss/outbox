@@ -67,14 +67,18 @@ function close(server: Server): Promise<void> {
   })
 }
 
-async function healthFor(packRootPath: (root: string) => string): Promise<unknown> {
+async function healthFor(
+  packRootPath: (root: string) => string,
+  brand = BRAND,
+  packBrand = brand
+): Promise<unknown> {
   const root = mkdtempSync(join(tmpdir(), 'outbox-app-'))
-  const rulesDirectory = join(root, 'content', BRAND)
+  const rulesDirectory = join(root, 'content', packBrand)
   mkdirSync(rulesDirectory, { recursive: true })
   writeFileSync(
     join(rulesDirectory, 'rules.json'),
     JSON.stringify({
-      topic: BRAND,
+      topic: packBrand,
       forbiddenClaims: [],
       micarUnsafe: [],
       provisionalParameters: []
@@ -84,7 +88,7 @@ async function healthFor(packRootPath: (root: string) => string): Promise<unknow
   const configResult = loadConfig({
     DB_PATH: join(root, 'outbox.sqlite'),
     PACK_ROOT: packRootPath(root),
-    BRAND,
+    BRAND: brand,
     DFX_API_BASE_URL: 'https://identity.invalid',
     JWT_SECRET: 'test-jwt-secret',
     X_CLIENT_ID: 'test-client-id',
@@ -136,6 +140,22 @@ describe('buildApp pack root', () => {
 
   it('does not load rules when PACK_ROOT points at content itself', async () => {
     const health = await healthFor((root) => join(root, 'content'))
+    expect(health).toMatchObject({
+      ok: false,
+      probes: { x: 'ok', jwt: 'ok' }
+    })
+  })
+
+  it('loads the pack for a configured non-default brand', async () => {
+    const health = await healthFor((root) => root, 'gifts', 'gifts')
+    expect(health).toMatchObject({
+      ok: true,
+      probes: { x: 'ok', jwt: 'ok' }
+    })
+  })
+
+  it('does not fall back to the default brand when the configured pack is absent', async () => {
+    const health = await healthFor((root) => root, 'gifts', 'dfx')
     expect(health).toMatchObject({
       ok: false,
       probes: { x: 'ok', jwt: 'ok' }

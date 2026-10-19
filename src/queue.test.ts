@@ -253,6 +253,34 @@ describe('serial queue state transitions', () => {
     })).toEqual({ ok: false, reason: 'conflict' })
   })
 
+  it('refuses retry and either resolution while a post is in-flight', () => {
+    const post = approved(NOW)
+    expect(claimNextDue(db, NOW)?.postId).toBe(post.id)
+
+    expect(retryPost(db, {
+      postId: post.id,
+      actor: ADMIN,
+      now: NOW + 1
+    })).toEqual({ ok: false, reason: 'conflict' })
+    for (const resolution of ['sent', 'failed'] as const) {
+      expect(resolveUncertain(db, {
+        postId: post.id,
+        resolution,
+        actor: ADMIN,
+        now: NOW + 1
+      })).toEqual({ ok: false, reason: 'conflict' })
+    }
+
+    expect(
+      db.prepare('SELECT status FROM scheduled_posts WHERE id = ?').get(post.id)
+    ).toEqual({ status: 'in-flight' })
+    expect(
+      db.prepare(
+        'SELECT COUNT(*) AS n FROM publish_results WHERE scheduledPostId = ?'
+      ).get(post.id)
+    ).toEqual({ n: 0 })
+  })
+
   it('marks every in-flight row uncertain at boot and audits the interruption', () => {
     const posts = [approved(NOW), approved(NOW)]
     const markInFlight = db.prepare(

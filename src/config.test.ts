@@ -37,4 +37,37 @@ describe('loadConfig', () => {
       }
     })
   })
+
+  it('maps each environment variable to its matching config field', () => {
+    const result = loadConfig({
+      PORT: '4321',
+      DB_PATH: '/tmp/sentinel-db.sqlite',
+      PACK_ROOT: '/tmp/sentinel-packs',
+      BRAND: 'gifts',
+      DFX_API_BASE_URL: 'https://identity.sentinel.invalid',
+      JWT_SECRET: 'jwt-sentinel',
+      X_CLIENT_ID: 'client-id-sentinel',
+      X_CLIENT_SECRET: 'client-secret-sentinel',
+      X_REFRESH_TOKEN: 'refresh-sentinel',
+      X_HANDLE: '@handle-sentinel',
+      X_API_BASE: 'https://x-api.sentinel.invalid'
+    } as NodeJS.ProcessEnv)
+
+    expect(result).toEqual({
+      ok: true,
+      config: {
+        port: 4321,
+        dbPath: '/tmp/sentinel-db.sqlite',
+        packRoot: '/tmp/sentinel-packs',
+        brand: 'gifts',
+        dfxApiBaseUrl: 'https://identity.sentinel.invalid',
+        jwtSecret: 'jwt-sentinel',
+        xClientId: 'client-id-sentinel',
+        xClientSecret: 'client-secret-sentinel',
+        xRefreshToken: 'refresh-sentinel',
+        xHandle: '@handle-sentinel',
+        xApiBase: 'https://x-api.sentinel.invalid'
+      }
+    })
+  })
 })

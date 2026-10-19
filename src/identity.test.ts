@@ -85,6 +85,34 @@ describe('createHttpIntrospect', () => {
     expect(fetch).not.toHaveBeenCalled()
   })
 
+  it.each([
+    { field: 'address', value: 'missing' },
+    { field: 'address', value: 'empty' },
+    { field: 'user', value: 'missing' },
+    { field: 'user', value: 'empty' },
+    { field: 'account', value: 'missing' },
+    { field: 'account', value: 'empty' }
+  ])('rejects a signed token with $value $field before fetch', async ({ field, value }) => {
+    const invalidClaims: Record<string, unknown> = { ...claims }
+    if (value === 'missing') {
+      delete invalidClaims[field]
+    } else {
+      invalidClaims[field] = ''
+    }
+    const fetch = vi.fn(async () => response(claims))
+    const introspect = createHttpIntrospect({
+      baseUrl: 'https://identity.invalid',
+      jwtSecret: secret,
+      fetch
+    })
+
+    await expect(introspect(token(invalidClaims), 'OUTBOX')).resolves.toEqual({
+      ok: false,
+      status: 401
+    })
+    expect(fetch).not.toHaveBeenCalled()
+  })
+
   it('returns 502 when introspection is aborted by its deadline', async () => {
     let capturedSignal: AbortSignal | null = null
     const fetch: typeof globalThis.fetch = async (_input, init) => {
