@@ -81,6 +81,7 @@ async function start(
     jwtSecret?: string
     probeX?: () => 'ok' | 'bad'
     introspect?: Introspect
+    publisher?: { running(): boolean }
   } = {}
 ): Promise<Harness> {
   const dir = mkdtempSync(join(tmpdir(), 'outbox-surface-'))
@@ -109,7 +110,8 @@ async function start(
     now: () => clock.now,
     jwtSecret: opts.jwtSecret ?? 'test-jwt-secret',
     log: (line) => logs.push(line),
-    probeX: opts.probeX
+    probeX: opts.probeX,
+    publisher: opts.publisher
   })
   const port = await listenZero(server)
   const harness: Harness = {
@@ -652,6 +654,269 @@ describe('healthz probes', () => {
       queueRunning: false,
       probes: { x: 'ok', jwt: 'ok' }
     })
+  })
+
+  it('reports the injected publisher running state', async () => {
+    const h = await start({ probeX: () => 'ok', publisher: { running: () => true } })
+    const health = await call(h.port, '/healthz')
+    expect(health.json).toMatchObject({ queueRunning: true })
+  })
+})
+
+describe('scheduled post recovery endpoints', () => {
+  async function queued(h: Harness, status: 'failed' | 'uncertain') {
+    const submitted = await submitJson(h.port, TOKEN_A, {
+      text: CLEAN,
+      scheduledAt: FUTURE_LOCAL
+    })
+    const created = submitted.json as { bundleId: string; entryId: string }
+    const approved = await call(h.port, `/review/${created.bundleId}/decide`, {
+      method: 'POST',
+      token: TOKEN_ADMIN,
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ decision: 'approve' })
+    })
+    expect(approved.status).toBe(200)
+    const row = h.db.prepare(
+      'SELECT id FROM scheduled_posts WHERE entryId = ?'
+    ).get(created.entryId) as { id: string }
+    h.db.prepare('UPDATE scheduled_posts SET status = ? WHERE id = ?').run(status, row.id)
+    return row.id
+  }
+
+  it('restricts retry and resolve to ADMIN and returns conflict on a repeated transition', async () => {
+    const h = await start()
+    const failedId = await queued(h, 'failed')
+    const denied = await call(
+      h.port,
+      `/api/posts/${failedId}/retry`,
+      { method: 'POST', token: TOKEN_A }
+    )
+    expect(denied.status).toBe(403)
+    const retried = await call(
+      h.port,
+      `/api/posts/${failedId}/retry`,
+      { method: 'POST', token: TOKEN_ADMIN }
+    )
+    expect(retried.status).toBe(200)
+    expect(retried.json).toEqual({ ok: true, status: 'pending' })
+    expect((await call(
+      h.port,
+      `/api/posts/${failedId}/retry`,
+      { method: 'POST', token: TOKEN_ADMIN }
+    )).status).toBe(409)
+
+    const uncertainId = await queued(h, 'uncertain')
+    const resolveDenied = await call(
+      h.port,
+      `/api/posts/${uncertainId}/resolve-uncertain`,
+      {
+        method: 'POST',
+        token: TOKEN_A,
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ resolution: 'failed' })
+      }
+    )
+    expect(resolveDenied.status).toBe(403)
+    const resolved = await call(
+      h.port,
+      `/api/posts/${uncertainId}/resolve-uncertain`,
+      {
+        method: 'POST',
+        token: TOKEN_ADMIN,
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          resolution: 'sent',
+          url: 'https://x.com/test_handle/status/1'
+        })
+      }
+    )
+    expect(resolved.status).toBe(200)
+    expect(resolved.json).toEqual({ ok: true, status: 'sent' })
+    expect((await call(
+      h.port,
+      `/api/posts/${uncertainId}/resolve-uncertain`,
+      {
+        method: 'POST',
+        token: TOKEN_ADMIN,
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ resolution: 'failed' })
+      }
+    )).status).toBe(409)
+  })
+
+  it('rejects foreign URL hosts and cookie mutations from a foreign Origin', async () => {
+    const h = await start()
+    const uncertainId = await queued(h, 'uncertain')
+    const badUrl = await call(
+      h.port,
+      `/api/posts/${uncertainId}/resolve-uncertain`,
+      {
+        method: 'POST',
+        token: TOKEN_ADMIN,
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          resolution: 'sent',
+          url: 'https://x.com.evil.invalid/status/1'
+        })
+      }
+    )
+    expect(badUrl.status).toBe(400)
+    const crossSite = await call(
+      h.port,
+      `/api/posts/${uncertainId}/resolve-uncertain`,
+      {
+        method: 'POST',
+        origin: 'https://evil.invalid',
+        headers: {
+          'content-type': 'application/json',
+          cookie: `outbox=${TOKEN_ADMIN}`
+        },
+        body: JSON.stringify({ resolution: 'failed' })
+      }
+    )
+    expect(crossSite.status).toBe(403)
+  })
+
+  it('returns HTML for retry and resolve form submissions', async () => {
+    const h = await start()
+    const failedId = await queued(h, 'failed')
+    const retry = await call(h.port, `/api/posts/${failedId}/retry`, {
+      method: 'POST',
+      token: TOKEN_ADMIN,
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      body: ''
+    })
+    expect(retry.status).toBe(200)
+    expect(retry.headers.get('content-type')).toContain('text/html')
+    expect(retry.text).toContain('Post status: pending.')
+
+    const uncertainId = await queued(h, 'uncertain')
+    const resolve = await call(
+      h.port,
+      `/api/posts/${uncertainId}/resolve-uncertain`,
+      {
+        method: 'POST',
+        token: TOKEN_ADMIN,
+        headers: { 'content-type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({ resolution: 'failed' }).toString()
+      }
+    )
+    expect(resolve.status).toBe(200)
+    expect(resolve.headers.get('content-type')).toContain('text/html')
+    expect(resolve.text).toContain('Post status: failed.')
+  })
+
+  it('shows channel state and admin recovery forms while GET leaves queue and audit unchanged', async () => {
+    const h = await start()
+    const postId = await queued(h, 'uncertain')
+    const counts = () => ({
+      posts: (
+        h.db.prepare('SELECT COUNT(*) AS n FROM scheduled_posts').get() as {
+          n: number
+        }
+      ).n,
+      audit: (
+        h.db.prepare('SELECT COUNT(*) AS n FROM audit').get() as {
+          n: number
+        }
+      ).n
+    })
+    const before = counts()
+    const list = await call(h.port, '/api/posts', { token: TOKEN_ADMIN })
+    expect(list.text).toContain(
+      `"channel":{"postId":"${postId}","channel":"x","status":"uncertain"`
+    )
+    const bundle = h.db.prepare(
+      `SELECT e.bundleId FROM scheduled_posts p
+       JOIN entries e ON e.id = p.entryId WHERE p.id = ?`
+    ).get(postId) as { bundleId: string }
+    const page = await call(h.port, `/review/${bundle.bundleId}`, { token: TOKEN_ADMIN })
+    expect(page.text).toContain('Mark as sent')
+    expect(page.text).toContain('Mark as failed')
+    const composer = await call(h.port, `/review/${bundle.bundleId}`, { token: TOKEN_A })
+    expect(composer.text).not.toContain('Mark as sent')
+    expect(composer.text).not.toContain('Mark as failed')
+    expect(counts()).toEqual(before)
+  })
+
+  it('creates scheduled posts only through the approve route', async () => {
+    const h = await start()
+    const countPosts = () => (
+      h.db.prepare('SELECT COUNT(*) AS n FROM scheduled_posts').get() as {
+        n: number
+      }
+    ).n
+
+    const submitted = await submitJson(h.port, TOKEN_ADMIN, {
+      text: CLEAN,
+      scheduledAt: FUTURE_LOCAL
+    })
+    const submission = submitted.json as { bundleId: string }
+    expect(countPosts()).toBe(0)
+
+    const reviewed = await call(h.port, '/api/review', {
+      method: 'POST',
+      token: TOKEN_ADMIN,
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ text: CLEAN })
+    })
+    expect(reviewed.status).toBe(200)
+    expect(countPosts()).toBe(0)
+
+    const retracted = await call(
+      h.port,
+      `/api/bundles/${submission.bundleId}/retract`,
+      { method: 'POST', token: TOKEN_ADMIN }
+    )
+    expect(retracted.status).toBe(200)
+    expect(countPosts()).toBe(0)
+
+    const approvable = await submitJson(h.port, TOKEN_ADMIN, {
+      text: CLEAN,
+      scheduledAt: FUTURE_LOCAL
+    })
+    const entry = approvable.json as { bundleId: string; entryId: string }
+    const decision = await call(
+      h.port,
+      `/review/${entry.bundleId}/decide`,
+      {
+        method: 'POST',
+        token: TOKEN_ADMIN,
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ decision: 'approve' })
+      }
+    )
+    expect(decision.status).toBe(200)
+    expect(countPosts()).toBe(1)
+    const post = h.db.prepare(
+      'SELECT id FROM scheduled_posts WHERE entryId = ?'
+    ).get(entry.entryId) as { id: string }
+
+    h.db.prepare("UPDATE scheduled_posts SET status = 'failed' WHERE id = ?")
+      .run(post.id)
+    const retried = await call(
+      h.port,
+      `/api/posts/${post.id}/retry`,
+      { method: 'POST', token: TOKEN_ADMIN }
+    )
+    expect(retried.status).toBe(200)
+    expect(countPosts()).toBe(1)
+
+    h.db.prepare("UPDATE scheduled_posts SET status = 'uncertain' WHERE id = ?")
+      .run(post.id)
+    const resolved = await call(
+      h.port,
+      `/api/posts/${post.id}/resolve-uncertain`,
+      {
+        method: 'POST',
+        token: TOKEN_ADMIN,
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ resolution: 'failed' })
+      }
+    )
+    expect(resolved.status).toBe(200)
+    expect(countPosts()).toBe(1)
   })
 })
 

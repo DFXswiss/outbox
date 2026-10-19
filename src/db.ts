@@ -30,11 +30,32 @@ CREATE TABLE IF NOT EXISTS scheduled_posts (
   entryId TEXT NOT NULL REFERENCES entries(id),
   channel TEXT NOT NULL,
   status TEXT NOT NULL,
+  url TEXT,
+  startedAt INTEGER,
   createdAt INTEGER NOT NULL,
   updatedAt INTEGER NOT NULL,
   authoredByUser TEXT NOT NULL,
   authoredByAccount TEXT NOT NULL,
   UNIQUE (entryId, channel)
+);
+
+CREATE TABLE IF NOT EXISTS publish_results (
+  id TEXT PRIMARY KEY,
+  scheduledPostId TEXT NOT NULL REFERENCES scheduled_posts(id),
+  at INTEGER NOT NULL,
+  ok INTEGER NOT NULL,
+  url TEXT,
+  error TEXT,
+  uncertain INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS x_credentials (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  accessToken TEXT,
+  accessTokenExpiresAt INTEGER,
+  refreshToken TEXT NOT NULL,
+  seedHash TEXT NOT NULL,
+  updatedAt INTEGER NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS audit (

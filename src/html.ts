@@ -114,6 +114,7 @@ export type ReviewPageInput = {
   recorded: EntryChecks | null
   lockReason: string | null
   approver: boolean
+  channel: { postId: string; channel: string; status: string; url: string | null } | null
 }
 
 export function renderReviewPage(input: ReviewPageInput): string {
@@ -130,12 +131,43 @@ export function renderReviewPage(input: ReviewPageInput): string {
       : ''
     actions = `<form method="post" action="/review/${encodeURIComponent(input.bundleId)}/decide">${approve}<button class="reject" type="submit" name="decision" value="reject">Reject</button></form>`
   }
+  const publishedLink = input.channel?.status === 'sent' && input.channel.url
+    ? `<p><a href="${escapeHtml(input.channel.url)}">View published post</a></p>`
+    : ''
+  const channel = input.channel
+    ? `<section class="checks">
+         <p>Channel: ${escapeHtml(input.channel.channel)} ·
+           <span class="state">${escapeHtml(input.channel.status)}</span>
+         </p>
+         ${publishedLink}
+       </section>`
+    : ''
+  if (input.approver && channel && input.channel?.status === 'failed') {
+    const target = `/api/posts/${encodeURIComponent(input.channel.postId)}/retry`
+    actions += `<form method="post" action="${target}">
+      <button type="submit">Retry</button>
+    </form>`
+  }
+  if (input.approver && input.channel?.status === 'uncertain') {
+    const target = `/api/posts/${encodeURIComponent(input.channel.postId)}/resolve-uncertain`
+    actions += `<form method="post" action="${target}">
+      <input type="hidden" name="resolution" value="sent">
+      <label for="post-url">Permalink</label>
+      <input id="post-url" name="url" type="url" required>
+      <button type="submit">Mark as sent</button>
+    </form>
+    <form method="post" action="${target}">
+      <input type="hidden" name="resolution" value="failed">
+      <button class="reject" type="submit">Mark as failed</button>
+    </form>`
+  }
   const body = `
 <h1>Review</h1>
 <p class="meta"><span class="state">${escapeHtml(input.state)}</span> · ${escapeHtml(input.scheduledLabel)}</p>
 ${lock}
 <div class="preview"><div class="text">${escapeHtml(input.text)}</div></div>
 ${renderChecks(input.recorded)}
+${channel}
 ${actions}`
   return page('Review', body)
 }

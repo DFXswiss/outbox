@@ -7,10 +7,12 @@
   },
   "scripts": {
     "test": "vitest run",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "start": "node --import tsx src/main.ts"
   },
   "dependencies": {
     "better-sqlite3": "^12.11.1",
+    "tsx": "4.20.3",
     "zod": "^3.24.2"
   },
   "devDependencies": {

@@ -1,8 +1,19 @@
 import { randomUUID } from 'node:crypto'
 import type { SqliteDatabase } from './db'
 
-export const AUDIT_EVENTS = ['submitted', 'retracted', 'decided', 'refused'] as const
+export const AUDIT_EVENTS = [
+  'submitted',
+  'retracted',
+  'decided',
+  'refused',
+  'published',
+  'retried',
+  'resolved',
+  'interrupted'
+] as const
 export type AuditEvent = (typeof AUDIT_EVENTS)[number]
+
+export const SYSTEM_ACTOR = { user: 'system', account: 'system' } as const
 
 export type AuditRecord = {
   at: number
