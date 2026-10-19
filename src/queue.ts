@@ -23,6 +23,12 @@ export function claimNextDue(
   now: number
 ): ClaimedPost | null {
   return immediate<ClaimedPost | null>(db, () => {
+    const inFlight = db.prepare(
+      `SELECT 1 FROM scheduled_posts WHERE status = 'in-flight' LIMIT 1`
+    ).get()
+    if (inFlight) {
+      return null
+    }
     const row = db.prepare(
       `SELECT p.id AS postId, e.id AS entryId, e.bundleId, e.text, e.scheduledAt,
               e.contentHash, e.imageSha256

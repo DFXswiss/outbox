@@ -116,21 +116,27 @@ export function createPublisher(deps: PublisherDeps) {
         if (!finished.ok) {
           throw new Error('publish result could not be recorded')
         }
-        if (finished.status === 'failed' || finished.status === 'uncertain') {
-          deps.alert({
-            kind: finished.status,
-            postId: post.postId,
-            detail: result.error ?? finished.status
-          })
-        }
         if (needsLogin) {
-          deps.alert({
-            kind: 'needs-login',
-            postId: post.postId,
-            detail: result.error ?? 'X login required'
-          })
           state = 'bad'
           lastProbeAt = now()
+        }
+        try {
+          if (finished.status === 'failed' || finished.status === 'uncertain') {
+            deps.alert({
+              kind: finished.status,
+              postId: post.postId,
+              detail: result.error ?? finished.status
+            })
+          }
+          if (needsLogin) {
+            deps.alert({
+              kind: 'needs-login',
+              postId: post.postId,
+              detail: result.error ?? 'X login required'
+            })
+          }
+        } catch {
+          logFailure('Publisher alert failed')
         }
       } catch {
         const detail = 'unexpected publisher failure'

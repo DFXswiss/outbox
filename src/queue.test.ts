@@ -80,6 +80,28 @@ describe('serial queue state transitions', () => {
     ).toEqual({ status: 'failed' })
   })
 
+  it('allows only one in-flight claim and claims the next post after finish', () => {
+    const firstPost = approved(NOW)
+    const secondPost = approved(NOW)
+    const firstClaim = claimNextDue(db, NOW)
+
+    expect(firstClaim).not.toBeNull()
+    expect([firstPost.id, secondPost.id]).toContain(firstClaim!.postId)
+    expect(claimNextDue(db, NOW)).toBeNull()
+
+    finishPost(db, {
+      postId: firstClaim!.postId,
+      result: { channel: 'x', ok: false, error: 'HTTP 400' },
+      now: NOW + 1
+    })
+
+    const secondClaim = claimNextDue(db, NOW + 1)
+    const expectedId = firstClaim!.postId === firstPost.id
+      ? secondPost.id
+      : firstPost.id
+    expect(secondClaim?.postId).toBe(expectedId)
+  })
+
   it.each([
     {
       result: {

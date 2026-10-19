@@ -391,6 +391,44 @@ describe('serial publisher', () => {
     expect(sends).toBe(1)
   })
 
+  it('keeps the failed result and pauses sends when a needs-login alert throws', async () => {
+    const firstPost = approve('login needed', NOW - 30_000)
+    const secondPost = approve('wait for recovery', NOW - 20_000)
+    let sends = 0
+    const logs: string[] = []
+    const publisher = createPublisher({
+      db,
+      x: {
+        probe: async () => 'ok',
+        postTweet: async () => {
+          sends += 1
+          return {
+            result: { channel: 'x', ok: false, error: 'HTTP 401' },
+            needsLogin: true
+          }
+        }
+      },
+      alert: () => {
+        throw new Error('alert failed')
+      },
+      log: (line) => logs.push(line),
+      now: () => clock.now,
+      intervalMs: 1_000_000,
+      reprobeMs: 100
+    })
+
+    await publisher.start()
+    await publisher.tick()
+    expect(publisher.probeState()).toBe('bad')
+    expect(status(firstPost.id)).toBe('failed')
+    expect(logs).toEqual(['Publisher alert failed'])
+
+    await publisher.tick()
+    expect(sends).toBe(1)
+    expect(status(secondPost.id)).toBe('pending')
+    await publisher.stop()
+  })
+
   it('keeps sends paused through a successful later probe', async () => {
     approve('login needed', NOW)
     approve('after recovery', NOW)

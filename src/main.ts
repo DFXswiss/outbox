@@ -18,8 +18,9 @@ if (config.xRefreshToken) {
 const { server, publisher } = buildApp(config, { db, log })
 
 server.listen(config.port, () => {
-  publisher.start().catch(() => {
-    log('Publisher failed to start')
+  publisher.start().catch((error: unknown) => {
+    const detail = error instanceof Error ? error.message : 'unknown error'
+    log(`Publisher failed to start: ${detail}`)
     process.exit(1)
   })
 })
