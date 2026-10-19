@@ -7,7 +7,11 @@ import { openDatabase, type SqliteDatabase } from './db'
 import { submitSubmission } from './entries'
 import { REVIEW_SCOPE } from './findings'
 import type { Identity, Introspect } from './identity'
-import { createOutboxServer, sessionCookie } from './server'
+import {
+  createOutboxServer,
+  sessionCookie,
+  type OutboxServerDeps
+} from './server'
 
 const NOW = Date.UTC(2023, 0, 1, 0, 0, 0)
 const CLEAN = 'The specification defines a design, not a live product.'
@@ -47,6 +51,15 @@ type Harness = {
 }
 
 const harnesses: Harness[] = []
+
+function assertServerRequiresBrand(
+  deps: Omit<OutboxServerDeps, 'brand'>
+): void {
+  // @ts-expect-error A server must receive its configured brand explicitly.
+  createOutboxServer(deps)
+}
+
+void assertServerRequiresBrand
 
 afterEach(async () => {
   while (harnesses.length > 0) {
@@ -106,6 +119,7 @@ async function start(
   const server = createOutboxServer({
     db,
     packRoot,
+    brand: 'dfx',
     introspect: opts.introspect ?? introspect,
     now: () => clock.now,
     jwtSecret: opts.jwtSecret ?? 'test-jwt-secret',
@@ -762,6 +776,20 @@ describe('scheduled post recovery endpoints', () => {
       }
     )
     expect(badUrl.status).toBe(400)
+    const acceptedSubdomain = await call(
+      h.port,
+      `/api/posts/${uncertainId}/resolve-uncertain`,
+      {
+        method: 'POST',
+        token: TOKEN_ADMIN,
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          resolution: 'sent',
+          url: 'https://www.x.com/test_handle/status/1'
+        })
+      }
+    )
+    expect(acceptedSubdomain.status).toBe(200)
     const crossSite = await call(
       h.port,
       `/api/posts/${uncertainId}/resolve-uncertain`,
@@ -776,6 +804,30 @@ describe('scheduled post recovery endpoints', () => {
       }
     )
     expect(crossSite.status).toBe(403)
+  })
+
+  it('rejects HTTP post URLs without resolving the uncertain post', async () => {
+    const h = await start()
+    const uncertainId = await queued(h, 'uncertain')
+    const response = await call(
+      h.port,
+      `/api/posts/${uncertainId}/resolve-uncertain`,
+      {
+        method: 'POST',
+        token: TOKEN_ADMIN,
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          resolution: 'sent',
+          url: 'http://x.com/test/status/1'
+        })
+      }
+    )
+
+    expect(response.status).toBe(400)
+    expect(
+      h.db.prepare('SELECT status, url FROM scheduled_posts WHERE id = ?')
+        .get(uncertainId)
+    ).toEqual({ status: 'uncertain', url: null })
   })
 
   it('allows resolving an uncertain post as sent without a URL', async () => {

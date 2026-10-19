@@ -11,13 +11,17 @@ if (!loaded.ok) {
 
 const config = loaded.config
 const db = openDatabase(config.dbPath)
+const log = (line: string) => process.stdout.write(`${line}\n`)
 if (config.xRefreshToken) {
   seedCredentials(db, config.xRefreshToken)
 }
-const { server, publisher } = buildApp(config, { db })
+const { server, publisher } = buildApp(config, { db, log })
 
 server.listen(config.port, () => {
-  void publisher.start()
+  publisher.start().catch(() => {
+    log('Publisher failed to start')
+    process.exit(1)
+  })
 })
 
 let stopping = false
@@ -26,18 +30,31 @@ async function shutdown(): Promise<void> {
     return
   }
   stopping = true
-  await publisher.stop()
-  await new Promise<void>((resolve, reject) => {
-    server.close((error) => {
-      if (error) {
-        reject(error)
-      } else {
-        resolve()
-      }
+  try {
+    await publisher.stop()
+  } catch {
+    log('Publisher stop failed')
+  }
+  try {
+    await new Promise<void>((resolve, reject) => {
+      server.close((error) => {
+        if (error) {
+          reject(error)
+        } else {
+          resolve()
+        }
+      })
     })
-  })
-  db.close()
-  process.exit(0)
+  } catch {
+    log('Server close failed')
+  } finally {
+    try {
+      db.close()
+    } catch {
+      log('Database close failed')
+    }
+    process.exit(0)
+  }
 }
 
 process.once('SIGTERM', () => {

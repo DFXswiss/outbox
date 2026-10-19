@@ -65,12 +65,12 @@ export function createPublisher(deps: PublisherDeps) {
       let post: ClaimedPost | null
       try {
         if (state !== 'ok') {
-          const probeState = now() - lastProbeAt >= reprobeMs
-            ? await runProbe()
-            : state
-          if (probeState !== 'ok') {
+          if (now() - lastProbeAt < reprobeMs) {
             return
           }
+          await runProbe()
+          // A 15s probe plus the 90s publish budget exceeds the 100s stop grace.
+          return
         }
         post = claimNextDue(deps.db, now())
       } catch {
@@ -197,6 +197,13 @@ export function createPublisher(deps: PublisherDeps) {
     startFlight = flight
     try {
       await flight
+    } catch (error) {
+      active = false
+      if (interval) {
+        clearInterval(interval)
+      }
+      interval = null
+      throw error
     } finally {
       if (startFlight === flight) {
         startFlight = null

@@ -83,6 +83,36 @@ function status(postId: string): string {
 }
 
 describe('serial publisher', () => {
+  it('clears running state when boot interruption alerts fail', async () => {
+    approve('interrupted post', NOW)
+    claimNextDue(db, NOW)
+    let alertCalls = 0
+    const publisher = createPublisher({
+      db,
+      x: {
+        probe: async () => 'ok',
+        postTweet: async () => ({
+          result: { channel: 'x', ok: true },
+          needsLogin: false
+        })
+      },
+      alert: () => {
+        alertCalls += 1
+        throw new Error('alert failed')
+      },
+      log: () => {},
+      now: () => clock.now,
+      intervalMs: 1_000_000
+    })
+
+    await expect(publisher.start()).rejects.toThrow('alert failed')
+    expect(publisher.running()).toBe(false)
+    await publisher.start()
+    expect(publisher.running()).toBe(true)
+    expect(alertCalls).toBe(1)
+    await publisher.stop()
+  })
+
   it('marks an in-flight post uncertain and alerts when the process starts again', async () => {
     const post = approve('interrupted post', NOW)
     claimNextDue(db, NOW)
@@ -137,6 +167,31 @@ describe('serial publisher', () => {
     clock.now += 50
     await publisher.tick()
     expect(sends).toBe(0)
+    await publisher.stop()
+  })
+
+  it('waits until the tick after a successful recovery probe to send', async () => {
+    const post = approve('send after recovery', NOW)
+    let probes = 0
+    let sends = 0
+    const { publisher } = harness(async () => {
+      sends += 1
+      return { result: { channel: 'x', ok: true }, needsLogin: false }
+    }, async () => {
+      probes += 1
+      return probes === 1 ? 'bad' : 'ok'
+    })
+
+    await publisher.start()
+    clock.now += 100
+    await publisher.tick()
+    expect(probes).toBe(2)
+    expect(sends).toBe(0)
+    expect(status(post.id)).toBe('pending')
+
+    await publisher.tick()
+    expect(sends).toBe(1)
+    expect(status(post.id)).toBe('sent')
     await publisher.stop()
   })
 
@@ -336,7 +391,7 @@ describe('serial publisher', () => {
     expect(sends).toBe(1)
   })
 
-  it('keeps sends paused after needs-login until a later probe succeeds', async () => {
+  it('keeps sends paused through a successful later probe', async () => {
     approve('login needed', NOW)
     approve('after recovery', NOW)
     let sends = 0
@@ -360,6 +415,8 @@ describe('serial publisher', () => {
     clock.now += 100
     await publisher.tick()
     expect(probes).toBe(2)
+    expect(sends).toBe(1)
+    await publisher.tick()
     expect(sends).toBe(2)
     await publisher.stop()
   })

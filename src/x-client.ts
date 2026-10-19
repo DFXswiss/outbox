@@ -139,16 +139,19 @@ export function createXClient(options: XClientOptions) {
   async function request(
     url: string,
     init: RequestInit,
-    deadlineMs: number
+    deadlineMs: number,
+    onDispatch?: () => void
   ): Promise<Response> {
     const remaining = deadlineMs - now()
     if (remaining <= 0) {
       throw new Error('Deadline exceeded')
     }
-    return fetchImpl(url, {
+    const requestInit = {
       ...init,
       signal: AbortSignal.timeout(remaining)
-    })
+    }
+    onDispatch?.()
+    return fetchImpl(url, requestInit)
   }
 
   async function refresh(deadlineMs: number): Promise<string> {
@@ -294,7 +297,6 @@ export function createXClient(options: XClientOptions) {
       if (deadlineMs <= now()) {
         throw new Error('Deadline exceeded before dispatch')
       }
-      postStarted = true
       return request(
         `${root}/2/tweets`,
         {
@@ -305,7 +307,10 @@ export function createXClient(options: XClientOptions) {
           },
           body: JSON.stringify({ text })
         },
-        deadlineMs
+        deadlineMs,
+        () => {
+          postStarted = true
+        }
       )
     }
     let response: Response

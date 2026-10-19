@@ -28,10 +28,10 @@ import { formatZurich, parseZurichDateTime } from './time'
 export type OutboxServerDeps = {
   db: SqliteDatabase
   packRoot: string
+  brand: string
   introspect: Introspect
   now?: () => number
   jwtSecret?: string
-  brand?: string
   log?: (line: string) => void
   /** Wired to the publisher's X probe state. Absent: the probe is `'bad'`. */
   probeX?: () => 'ok' | 'bad'
@@ -41,7 +41,6 @@ export type OutboxServerDeps = {
 const COOKIE_NAME = 'outbox'
 const COOKIE_MAX_AGE_SEC = 12 * 60 * 60
 const BODY_LIMIT = 1_000_000
-const DEFAULT_BRAND = 'dfx'
 const ResolveInputSchema = z.object({
   resolution: z.enum(['sent', 'failed']),
   url: z.string().optional()
@@ -248,7 +247,7 @@ function isVisible(identity: Identity, row: EntryView): boolean {
 
 export function createOutboxServer(deps: OutboxServerDeps): Server {
   const now = deps.now ?? (() => Date.now())
-  const brand = deps.brand ?? DEFAULT_BRAND
+  const brand = deps.brand
   const log = createLog(deps.log ?? ((line) => process.stdout.write(line + '\n')))
 
   async function authenticate(
@@ -769,7 +768,14 @@ export function createOutboxServer(deps: OutboxServerDeps): Server {
           }
           if (
             parsedUrl.protocol !== 'https:' ||
-            !['x.com', 'twitter.com'].includes(parsedUrl.host.toLowerCase()) ||
+            ![
+              'x.com',
+              'www.x.com',
+              'mobile.x.com',
+              'twitter.com',
+              'www.twitter.com',
+              'mobile.twitter.com'
+            ].includes(parsedUrl.hostname.toLowerCase()) ||
             parsedUrl.pathname === '/'
           ) {
             fail(

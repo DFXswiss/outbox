@@ -120,6 +120,29 @@ describe('X publisher client', () => {
     expect(result.result.error).not.toContain('test-refresh-token')
   })
 
+  it('classifies a deadline between dispatch and fetch as failed', async () => {
+    let clockCalls = 0
+    let tweetRequests = 0
+    const x = client(async (input) => {
+      if (String(input).endsWith('/2/tweets')) {
+        tweetRequests += 1
+      }
+      return json({ data: { id: '1' } }, 201)
+    }, {
+      now: () => {
+        clockCalls += 1
+        return clockCalls <= 2 ? NOW : NOW + 20_000
+      }
+    })
+
+    const response = await x.postTweet('hello', NOW + 20_000)
+
+    expect(response.result.ok).toBe(false)
+    expect(response.result.uncertain).not.toBe(true)
+    expect('uncertain' in response.result).toBe(false)
+    expect(tweetRequests).toBe(0)
+  })
+
   it('treats a successful HTTP response without an id as uncertain', async () => {
     const x = client(async () => json({ data: { text: 'accepted?' } }, 201))
     expect((await x.postTweet('hello', NOW + 20_000)).result)
