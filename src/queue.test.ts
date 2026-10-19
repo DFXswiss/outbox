@@ -213,14 +213,23 @@ describe('serial queue state transitions', () => {
   })
 
   it('marks every in-flight row uncertain at boot and audits the interruption', () => {
-    const post = approved(NOW)
-    claimNextDue(db, NOW)
-    expect(markInterruptedOnBoot(db, NOW + 1)).toEqual([post.id])
+    const posts = [approved(NOW), approved(NOW)]
+    const markInFlight = db.prepare(
+      "UPDATE scheduled_posts SET status = 'in-flight' WHERE id = ?"
+    )
+    for (const post of posts) {
+      markInFlight.run(post.id)
+    }
+
+    expect(markInterruptedOnBoot(db, NOW + 1).sort())
+      .toEqual(posts.map((post) => post.id).sort())
+    for (const post of posts) {
+      expect(
+        db.prepare('SELECT status FROM scheduled_posts WHERE id = ?').get(post.id)
+      ).toEqual({ status: 'uncertain' })
+    }
     expect(
-      db.prepare('SELECT status FROM scheduled_posts WHERE id = ?').get(post.id)
-    ).toEqual({ status: 'uncertain' })
-    expect(
-      db.prepare("SELECT event, reason FROM audit WHERE event = 'interrupted'").get()
-    ).toEqual({ event: 'interrupted', reason: 'interrupted by restart' })
+      db.prepare("SELECT COUNT(*) AS n FROM audit WHERE event = 'interrupted'").get()
+    ).toEqual({ n: 2 })
   })
 })

@@ -358,7 +358,7 @@ describe('serial publisher', () => {
     await publisher.stop()
   })
 
-  it('stop waits for the running post and needs-login blocks further sends', async () => {
+  it('stop waits for the running post and emits the needs-login alert', async () => {
     approve('one', NOW)
     approve('two', NOW)
     let sends = 0

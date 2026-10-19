@@ -37,7 +37,7 @@ async function shutdown(): Promise<void> {
     log('Publisher stop failed')
   }
   try {
-    await new Promise<void>((resolve, reject) => {
+    const closed = new Promise<void>((resolve, reject) => {
       server.close((error) => {
         if (error) {
           reject(error)
@@ -46,6 +46,8 @@ async function shutdown(): Promise<void> {
         }
       })
     })
+    server.closeAllConnections()
+    await closed
   } catch {
     log('Server close failed')
   } finally {

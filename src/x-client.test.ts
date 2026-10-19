@@ -168,7 +168,7 @@ describe('X publisher client', () => {
       .toMatchObject({ ok: false, uncertain: true })
   })
 
-  it('refreshes once after 401, persists rotation before posting, and sends Basic auth only with a secret', async () => {
+  it('refreshes once after 401, persists rotation, and sends Basic auth with a client secret', async () => {
     const requests: Array<{ url: string; authorization: string | null }> = []
     let tweets = 0
     const fetch: typeof globalThis.fetch = async (input, init) => {

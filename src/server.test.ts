@@ -763,7 +763,7 @@ describe('scheduled post recovery endpoints', () => {
     const h = await start()
     await queued(h, 'uncertain')
     const before = h.db.prepare(
-      'SELECT id, status, url, updatedAt FROM scheduled_posts ORDER BY id'
+      'SELECT * FROM scheduled_posts ORDER BY id'
     ).all()
     const unknownId = 'missing-post-id'
     const retry = await call(
@@ -785,7 +785,7 @@ describe('scheduled post recovery endpoints', () => {
     expect(retry.status).toBe(404)
     expect(resolve.status).toBe(404)
     expect(h.db.prepare(
-      'SELECT id, status, url, updatedAt FROM scheduled_posts ORDER BY id'
+      'SELECT * FROM scheduled_posts ORDER BY id'
     ).all()).toEqual(before)
   })
 
