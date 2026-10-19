@@ -4,3 +4,5 @@ coverage
 *.log
 *.sqlite*
 content/*/rules.json
+.env
+.env.*

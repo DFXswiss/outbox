@@ -192,8 +192,8 @@ Blocking: forbidden claims, MiCAR-unsafe, provisional without qualifier. Hints: 
 | `POST /api/bundles/:id/retract` | OUTBOX, authoredBy | Phase 1: one entry per bundle. 409 unless every entry is `submitted`; then CAS all to `retracted` |
 | `GET /review/:id` | same visibility as `GET /api/posts` | `:id` is the **bundle** id. GET, no side effect; no token in the query |
 | `POST /review/:id/decide` | ADMIN | `:id` is the bundle id. Body `{ decision: "approve"\|"reject" }` for that bundle's single entry (phase 1). CAS `submitted → approved\|rejected`. Queue insert **only** on `approve`, same transaction. Retract vs decide: one winner. Repeat 409. |
-| `POST /api/posts/:id/retry` | ADMIN | CAS `WHERE id=? AND status='failed'` → `pending`; else 409 |
-| `POST /api/posts/:id/resolve-uncertain` | ADMIN | `{ resolution: "sent"\|"failed", url? }`. CAS `WHERE id=? AND status='uncertain'`; else 409 |
+| `POST /api/posts/:id/retry` | ADMIN | CAS `WHERE id=? AND status='failed'` → `pending`; unknown id 404, else 409 |
+| `POST /api/posts/:id/resolve-uncertain` | ADMIN | `{ resolution: "sent"\|"failed", url? }`. CAS `WHERE id=? AND status='uncertain'`; unknown id 404, else 409 |
 
 No `/api/publish`, `/api/schedule`, `/now`.
 
@@ -205,7 +205,7 @@ Logs: denylist `Authorization`, Cookie, Bearer. No JWT in HTML.
 
 ## Data model
 
-SQLite WAL. Tables: drafts, bundles, entries, scheduled_posts, publish_results, audit, media.
+SQLite WAL. Tables: drafts, bundles, entries, scheduled_posts, publish_results, audit, media, x_credentials (the X OAuth token pair; the refresh token is stored at rest because it rotates).
 
 Phase 1: **one entry per bundle**. `GET`/`POST /review/:id` uses the bundle id.
 
