@@ -3,3 +3,6 @@ node_modules
 *.sqlite*
 coverage
 **/*.test.ts
+.env
+.env.*
+*.log

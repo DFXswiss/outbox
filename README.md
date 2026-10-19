@@ -149,8 +149,8 @@ SIGTERM: ticker stops, waits for `runningId`. Boot: interrupted in-flight channe
 
 **Approver (ADMIN):**
 
-- `POST /api/posts/:id/retry` — `BEGIN IMMEDIATE` + `UPDATE … WHERE id=? AND status='failed'` → `pending`, audit, **no** synchronous X call. 0 rows → 409. Ticker takes due.
-- `POST /api/posts/:id/resolve-uncertain` — `{ resolution: "sent"|"failed", url? }`. Channel comes from the row. CAS `WHERE id=? AND status='uncertain'`; else 409.
+- `POST /api/posts/:id/retry` — `BEGIN IMMEDIATE` + `UPDATE … WHERE id=? AND status='failed'` → `pending`, audit, **no** synchronous X call. Unknown id → 404; a post that is not `failed` → 409. Ticker takes due.
+- `POST /api/posts/:id/resolve-uncertain` — `{ resolution: "sent"|"failed", url? }`. Channel comes from the row. CAS `WHERE id=? AND status='uncertain'`. Unknown id → 404; a post that is not `uncertain` → 409. A given `url` must be an X post permalink (`/<handle>/status/<id>`); query and fragment are dropped.
 
 Channel status: `pending | in-flight | sent | failed | uncertain`. `PublishResult.ok` is a JSON boolean, not the status.
 
@@ -200,6 +200,30 @@ No `/api/publish`, `/api/schedule`, `/now`.
 `PublishResult`: `{ channel, ok, url?, error?, uncertain? }`. Phase 1 `channel: 'x'`.
 
 Logs: denylist `Authorization`, Cookie, Bearer. No JWT in HTML.
+
+---
+
+## Configuration
+
+Environment variables, read once at start. A missing or invalid required variable stops the process with its **name** (never its value).
+
+| Variable | Required | Default | Meaning |
+|---|---|---|---|
+| `DB_PATH` | yes | image: `/data/outbox.sqlite` | SQLite file on durable storage |
+| `BRAND` | yes | — | Brand slug; the pack is `<PACK_ROOT>/content/<BRAND>/rules.json` |
+| `PACK_ROOT` | no | `.` (image: `/app`) | Directory that **contains** `content/` |
+| `PORT` | no | `3000` | HTTP port |
+| `DFX_API_BASE_URL` | yes | — | DFX API for introspection |
+| `JWT_SECRET` | no | — | Same HS256 secret as the DFX API; unset → health `jwt: bad` |
+| `X_CLIENT_ID` | yes | — | X OAuth 2.0 client id |
+| `X_CLIENT_SECRET` | no | — | Confidential clients only; sent as Basic auth on refresh |
+| `X_REFRESH_TOKEN` | no | — | Seed for the stored refresh token, see below |
+| `X_HANDLE` | yes | — | Account the boot probe expects (leading `@` optional) |
+| `X_API_BASE` | no | `https://api.x.com` | X API base |
+
+**Refresh token.** X refresh tokens are treated as single-use: every refresh stores the new pair in `x_credentials` before the access token is used. `X_REFRESH_TOKEN` only seeds that row. The same value on a later start changes nothing; a **different** value replaces the stored token. After a lost rotation (`needs-login` alert), authorize again, set the new refresh token, and restart.
+
+**Container.** The rule list `content/<brand>/rules.json` is not in this repository; the build places it in the context before `docker build`. A running publish has a 90 s budget, so the deployment needs a stop grace of at least 100 s.
 
 ---
 
