@@ -42,6 +42,27 @@ describe('createHttpIntrospect', () => {
     expect(fetch).toHaveBeenCalledOnce()
   })
 
+  it('maps SUPER_ADMIN to ADMIN', async () => {
+    const fetch = vi.fn(async () => response({
+      user: 'user-1',
+      account: 'account-1',
+      role: 'SUPER_ADMIN'
+    }))
+    const introspect = createHttpIntrospect({
+      baseUrl: 'https://identity.invalid',
+      jwtSecret: secret,
+      fetch
+    })
+
+    await expect(introspect(token(claims), 'ADMIN')).resolves.toEqual({
+      ok: true,
+      user: 'user-1',
+      account: 'account-1',
+      role: 'ADMIN'
+    })
+    expect(fetch).toHaveBeenCalledOnce()
+  })
+
   it('rejects a response with an account different from the verified claim', async () => {
     const fetch = vi.fn(async () => response({ ...claims, account: 'account-2' }))
     const introspect = createHttpIntrospect({
