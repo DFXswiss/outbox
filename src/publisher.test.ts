@@ -382,10 +382,12 @@ describe('serial publisher', () => {
     const stopping = publisher.stop().then(() => {
       stopped = true
     })
+    await new Promise<void>((resolve) => setImmediate(resolve))
     expect(stopped).toBe(false)
     finish()
     await tick
     await stopping
+    expect(stopped).toBe(true)
     expect(publisher.running()).toBe(false)
     expect(alerts.some((item) => item.kind === 'needs-login')).toBe(true)
     expect(sends).toBe(1)
