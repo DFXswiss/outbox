@@ -84,4 +84,34 @@ describe('createHttpIntrospect', () => {
     })
     expect(fetch).not.toHaveBeenCalled()
   })
+
+  it('returns 502 when introspection is aborted by its deadline', async () => {
+    let capturedSignal: AbortSignal | null = null
+    const fetch: typeof globalThis.fetch = async (_input, init) => {
+      const signal = init?.signal
+      if (!signal) {
+        throw new Error('expected an abort signal')
+      }
+      capturedSignal = signal
+      return new Promise<Response>((_resolve, reject) => {
+        const abort = () => reject(signal.reason)
+        if (signal.aborted) {
+          abort()
+        } else {
+          signal.addEventListener('abort', abort, { once: true })
+        }
+      })
+    }
+    const introspect = createHttpIntrospect({
+      baseUrl: 'https://identity.invalid',
+      fetch,
+      timeoutMs: 1
+    })
+
+    await expect(introspect('test-token', 'OUTBOX')).resolves.toEqual({
+      ok: false,
+      status: 502
+    })
+    expect(capturedSignal).toBeInstanceOf(AbortSignal)
+  })
 })

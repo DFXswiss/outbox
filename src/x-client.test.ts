@@ -78,6 +78,25 @@ describe('X publisher client', () => {
     expect(dispatched).toBe(1)
   })
 
+  it('does not follow a tweet redirect and classifies the dispatched post as uncertain', async () => {
+    let tweetRequests = 0
+    let redirect: RequestInit['redirect']
+    const x = client(async (input, init) => {
+      if (String(input).endsWith('/2/tweets')) {
+        tweetRequests += 1
+        redirect = init?.redirect
+        return json({ title: 'Temporary redirect' }, 307)
+      }
+      return json({}, 404)
+    })
+
+    const response = await x.postTweet('hello', NOW + 20_000)
+
+    expect(response.result).toMatchObject({ ok: false, uncertain: true })
+    expect(tweetRequests).toBe(1)
+    expect(redirect).toBe('manual')
+  })
+
   it('does not dispatch after the deadline and redacts tokens from X error details', async () => {
     let requests = 0
     let clockCalls = 0
@@ -285,7 +304,7 @@ describe('X publisher client', () => {
     expect(loadCredentials(db)?.refreshToken).toBe('test-refresh-token')
   })
 
-  it('does not expose tokens in errors and honors an unchanged seed without undoing rotation', () => {
+  it('keeps rotation for an unchanged seed and replaces it for a changed seed', () => {
     db.prepare("UPDATE x_credentials SET refreshToken = 'rotated-refresh-token' WHERE id = 1").run()
     seedCredentials(db, 'test-refresh-token', NOW + 1)
     expect(loadCredentials(db)?.refreshToken).toBe('rotated-refresh-token')

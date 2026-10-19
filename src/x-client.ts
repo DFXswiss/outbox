@@ -146,8 +146,9 @@ export function createXClient(options: XClientOptions) {
     if (remaining <= 0) {
       throw new Error('Deadline exceeded')
     }
-    const requestInit = {
+    const requestInit: RequestInit = {
       ...init,
+      redirect: 'manual',
       signal: AbortSignal.timeout(remaining)
     }
     onDispatch?.()
@@ -393,7 +394,11 @@ export function createXClient(options: XClientOptions) {
       token,
       loadCredentials(options.db)?.refreshToken ?? ''
     ])
-    if (response.status >= 500 || (response.status >= 200 && response.status < 300)) {
+    if (
+      (response.status >= 300 && response.status < 400) ||
+      response.status >= 500 ||
+      (response.status >= 200 && response.status < 300)
+    ) {
       return {
         result: { channel: 'x', ok: false, uncertain: true, error },
         needsLogin: false

@@ -759,6 +759,36 @@ describe('scheduled post recovery endpoints', () => {
     )).status).toBe(409)
   })
 
+  it('returns 404 for unknown retry and resolve post ids without changing the queue', async () => {
+    const h = await start()
+    await queued(h, 'uncertain')
+    const before = h.db.prepare(
+      'SELECT id, status, url, updatedAt FROM scheduled_posts ORDER BY id'
+    ).all()
+    const unknownId = 'missing-post-id'
+    const retry = await call(
+      h.port,
+      `/api/posts/${unknownId}/retry`,
+      { method: 'POST', token: TOKEN_ADMIN }
+    )
+    const resolve = await call(
+      h.port,
+      `/api/posts/${unknownId}/resolve-uncertain`,
+      {
+        method: 'POST',
+        token: TOKEN_ADMIN,
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ resolution: 'failed' })
+      }
+    )
+
+    expect(retry.status).toBe(404)
+    expect(resolve.status).toBe(404)
+    expect(h.db.prepare(
+      'SELECT id, status, url, updatedAt FROM scheduled_posts ORDER BY id'
+    ).all()).toEqual(before)
+  })
+
   it('rejects foreign URL hosts and cookie mutations from a foreign Origin', async () => {
     const h = await start()
     const uncertainId = await queued(h, 'uncertain')
@@ -771,7 +801,7 @@ describe('scheduled post recovery endpoints', () => {
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
           resolution: 'sent',
-          url: 'https://x.com.evil.invalid/status/1'
+          url: 'https://x.com.evil.invalid/test/status/1'
         })
       }
     )
@@ -948,14 +978,8 @@ describe('scheduled post recovery endpoints', () => {
     const h = await start()
     const postId = await queued(h, 'uncertain')
     const snapshot = () => ({
-      posts: h.db.prepare(
-        'SELECT id, status, url, updatedAt FROM scheduled_posts ORDER BY id'
-      ).all(),
-      audit: (
-        h.db.prepare('SELECT COUNT(*) AS n FROM audit').get() as {
-          n: number
-        }
-      ).n
+      posts: h.db.prepare('SELECT * FROM scheduled_posts ORDER BY id').all(),
+      audit: h.db.prepare('SELECT * FROM audit ORDER BY id').all()
     })
     const before = snapshot()
     const list = await call(h.port, '/api/posts', { token: TOKEN_ADMIN })
