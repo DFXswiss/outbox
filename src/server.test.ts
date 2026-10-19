@@ -778,6 +778,68 @@ describe('scheduled post recovery endpoints', () => {
     expect(crossSite.status).toBe(403)
   })
 
+  it('allows resolving an uncertain post as sent without a URL', async () => {
+    const h = await start()
+    const postId = await queued(h, 'uncertain')
+    const resolved = await call(
+      h.port,
+      `/api/posts/${postId}/resolve-uncertain`,
+      {
+        method: 'POST',
+        token: TOKEN_ADMIN,
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ resolution: 'sent' })
+      }
+    )
+    expect(resolved.status).toBe(200)
+    expect(resolved.json).toEqual({ ok: true, status: 'sent' })
+    expect(
+      h.db.prepare('SELECT url FROM scheduled_posts WHERE id = ?').get(postId)
+    ).toEqual({ url: null })
+  })
+
+  it('allows resolving an uncertain post as sent with an empty form URL', async () => {
+    const h = await start()
+    const postId = await queued(h, 'uncertain')
+    const resolved = await call(
+      h.port,
+      `/api/posts/${postId}/resolve-uncertain`,
+      {
+        method: 'POST',
+        token: TOKEN_ADMIN,
+        headers: { 'content-type': 'application/x-www-form-urlencoded' },
+        body: 'resolution=sent&url='
+      }
+    )
+
+    expect(resolved.status).toBe(200)
+    expect(resolved.text).toContain('Post status: sent.')
+    expect(
+      h.db.prepare('SELECT status, url FROM scheduled_posts WHERE id = ?').get(postId)
+    ).toEqual({ status: 'sent', url: null })
+  })
+
+  it('allows resolving an uncertain post as failed with an empty form URL', async () => {
+    const h = await start()
+    const postId = await queued(h, 'uncertain')
+    const resolved = await call(
+      h.port,
+      `/api/posts/${postId}/resolve-uncertain`,
+      {
+        method: 'POST',
+        token: TOKEN_ADMIN,
+        headers: { 'content-type': 'application/x-www-form-urlencoded' },
+        body: 'resolution=failed&url='
+      }
+    )
+
+    expect(resolved.status).toBe(200)
+    expect(resolved.text).toContain('Post status: failed.')
+    expect(
+      h.db.prepare('SELECT status, url FROM scheduled_posts WHERE id = ?').get(postId)
+    ).toEqual({ status: 'failed', url: null })
+  })
+
   it('returns HTML for retry and resolve form submissions', async () => {
     const h = await start()
     const failedId = await queued(h, 'failed')

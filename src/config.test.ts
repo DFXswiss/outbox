@@ -10,6 +10,7 @@ describe('loadConfig', () => {
       ok: false,
       variables: expect.arrayContaining([
         'DB_PATH',
+        'BRAND',
         'DFX_API_BASE_URL',
         'X_CLIENT_ID',
         'X_HANDLE'
@@ -21,6 +22,7 @@ describe('loadConfig', () => {
   it('uses defaults and parses the required configuration', () => {
     const result = loadConfig({
       DB_PATH: '/tmp/outbox.sqlite',
+      BRAND: 'test-brand',
       DFX_API_BASE_URL: 'https://identity.invalid',
       X_CLIENT_ID: 'test-client',
       X_HANDLE: '@test_handle'
@@ -30,7 +32,7 @@ describe('loadConfig', () => {
       config: {
         port: 3000,
         packRoot: '.',
-        brand: 'dfx',
+        brand: 'test-brand',
         xApiBase: 'https://api.x.com'
       }
     })

@@ -153,7 +153,7 @@ export function renderReviewPage(input: ReviewPageInput): string {
     actions += `<form method="post" action="${target}">
       <input type="hidden" name="resolution" value="sent">
       <label for="post-url">Permalink</label>
-      <input id="post-url" name="url" type="url" required>
+      <input id="post-url" name="url" type="url">
       <button type="submit">Mark as sent</button>
     </form>
     <form method="post" action="${target}">

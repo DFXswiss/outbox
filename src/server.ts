@@ -33,7 +33,7 @@ export type OutboxServerDeps = {
   jwtSecret?: string
   brand?: string
   log?: (line: string) => void
-  /** Wired in a later step to `GET /2/users/me`. Absent: the probe is `'bad'`. */
+  /** Wired to the publisher's X probe state. Absent: the probe is `'bad'`. */
   probeX?: () => 'ok' | 'bad'
   publisher?: { running(): boolean }
 }
@@ -739,22 +739,20 @@ export function createOutboxServer(deps: OutboxServerDeps): Server {
           )
           return
         }
-        const { resolution, url: targetUrl } = body.data
-        if (
-          (resolution === 'sent' && !targetUrl) ||
-          (resolution === 'failed' && targetUrl !== undefined)
-        ) {
+        const { resolution } = body.data
+        const targetUrl = body.data.url?.trim() || undefined
+        if (resolution === 'failed' && targetUrl !== undefined) {
           fail(
             res,
             req,
             pathname,
             400,
             'invalid-request',
-            'url is required only when resolution is sent.'
+            'url is allowed only when resolution is sent.'
           )
           return
         }
-        if (targetUrl) {
+        if (targetUrl !== undefined) {
           let parsedUrl: URL
           try {
             parsedUrl = new URL(targetUrl)
@@ -788,7 +786,7 @@ export function createOutboxServer(deps: OutboxServerDeps): Server {
         result = resolveUncertain(deps.db, {
           postId,
           resolution,
-          ...(targetUrl ? { url: targetUrl } : {}),
+          ...(targetUrl !== undefined ? { url: targetUrl } : {}),
           actor: {
             user: auth.identity.user,
             account: auth.identity.account

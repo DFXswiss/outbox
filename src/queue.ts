@@ -245,18 +245,3 @@ export function resolveUncertain(
     }
   )
 }
-
-export type PostView = {
-  postId: string
-  channel: string
-  status: string
-  url: string | null
-}
-
-export function loadPostView(db: SqliteDatabase, entryId: string): PostView | null {
-  const row = db.prepare(
-    `SELECT id AS postId, channel, status, url
-     FROM scheduled_posts WHERE entryId = ?`
-  ).get(entryId) as PostView | undefined
-  return row ?? null
-}

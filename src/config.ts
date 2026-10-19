@@ -5,7 +5,7 @@ const schema = z.object({
   DB_PATH: z.string().min(1),
   // This directory contains content/<brand>/rules.json.
   PACK_ROOT: z.string().min(1).default('.'),
-  BRAND: z.string().min(1).default('dfx'),
+  BRAND: z.string().min(1),
   DFX_API_BASE_URL: z.string().url(),
   JWT_SECRET: z.string().optional(),
   X_CLIENT_ID: z.string().min(1),
