@@ -68,36 +68,63 @@ describe('X publisher client', () => {
     expect(response.result.uncertain).toBeUndefined()
   })
 
-  it('classifies a server error and a network failure after dispatch as uncertain', async () => {
-    const server = client(async () => json({ title: 'Unavailable' }, 503))
-    expect((await server.postTweet('hello', NOW + 20_000)).result)
-      .toMatchObject({ uncertain: true, error: 'HTTP 503: Unavailable' })
-    let dispatched = 0
-    const network = client(async () => {
-      dispatched += 1
-      throw new Error('socket failed')
-    })
-    expect((await network.postTweet('hello', NOW + 20_000)).result).toMatchObject({ uncertain: true })
-    expect(dispatched).toBe(1)
-  })
-
-  it('does not follow a tweet redirect and classifies the dispatched post as uncertain', async () => {
+  it.each([
+    { label: 'HTTP 500', status: 500, body: { title: 'Unavailable' } },
+    { label: 'HTTP 503', status: 503, body: { title: 'Unavailable' } },
+    { label: 'HTTP 307', status: 307, body: { title: 'Temporary redirect' } },
+    { label: '2xx without an id', status: 201, body: { data: { text: 'accepted?' } } },
+    { label: 'network failure', error: 'socket failed' },
+    { label: 'deadline after dispatch', deadline: true }
+  ] as Array<{
+    label: string
+    status?: number
+    body?: unknown
+    error?: string
+    deadline?: boolean
+  }>)('classifies $label after dispatch without retrying', async (scenario) => {
     let tweetRequests = 0
+    let tokenRequests = 0
+    let deadlineNow = NOW
     let redirect: RequestInit['redirect']
     const x = client(async (input, init) => {
-      if (String(input).endsWith('/2/tweets')) {
-        tweetRequests += 1
-        redirect = init?.redirect
-        return json({ title: 'Temporary redirect' }, 307)
+      const url = String(input)
+      if (url.endsWith('/2/oauth2/token')) {
+        tokenRequests += 1
+        return json({
+          access_token: 'refreshed-access-token',
+          refresh_token: 'rotated-refresh-token',
+          expires_in: 7200
+        })
       }
-      return json({}, 404)
+      if (!url.endsWith('/2/tweets')) {
+        return json({}, 404)
+      }
+
+      tweetRequests += 1
+      redirect = init?.redirect
+      if (scenario.deadline) {
+        deadlineNow = NOW + 1_001
+        throw new DOMException('The operation was aborted', 'AbortError')
+      }
+      if (scenario.error) {
+        throw new Error(scenario.error)
+      }
+      return json(scenario.body, scenario.status)
+    }, {
+      now: () => deadlineNow
     })
 
-    const response = await x.postTweet('hello', NOW + 20_000)
+    const deadline = scenario.deadline ? NOW + 1_000 : NOW + 20_000
+    const response = await x.postTweet('hello', deadline)
 
-    expect(response.result).toMatchObject({ ok: false, uncertain: true })
+    expect(response.result.ok).toBe(false)
+    expect(response.result.uncertain).toBe(true)
+    expect(response.needsLogin).toBe(false)
     expect(tweetRequests).toBe(1)
-    expect(redirect).toBe('manual')
+    expect(tokenRequests).toBe(0)
+    if (scenario.status === 307) {
+      expect(redirect).toBe('manual')
+    }
   })
 
   it('does not dispatch after the deadline and redacts tokens from X error details', async () => {
@@ -165,12 +192,6 @@ describe('X publisher client', () => {
     expect(tweetRequests).toBe(0)
   })
 
-  it('treats a successful HTTP response without an id as uncertain', async () => {
-    const x = client(async () => json({ data: { text: 'accepted?' } }, 201))
-    expect((await x.postTweet('hello', NOW + 20_000)).result)
-      .toMatchObject({ ok: false, uncertain: true })
-  })
-
   it('refreshes once after 401, persists rotation, and sends Basic auth with a client secret', async () => {
     const requests: Array<{ url: string; authorization: string | null }> = []
     let tweets = 0
@@ -179,7 +200,10 @@ describe('X publisher client', () => {
       const headers = new Headers(init?.headers)
       requests.push({ url, authorization: headers.get('authorization') })
       if (url.endsWith('/2/oauth2/token')) {
-        expect(headers.get('authorization')).toMatch(/^Basic /)
+        const authorization = headers.get('authorization')
+        expect(authorization).toMatch(/^Basic /)
+        const payload = Buffer.from(authorization!.slice(6), 'base64').toString('utf8')
+        expect(payload).toBe('test-client:test-client-secret')
         return json({
           access_token: 'refreshed-access-token',
           refresh_token: 'rotated-refresh-token',
