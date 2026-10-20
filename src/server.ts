@@ -4,6 +4,9 @@ import {
   type Server,
   type ServerResponse
 } from 'node:http'
+import { readFileSync, readdirSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { z } from 'zod'
 import { writeAudit } from './audit'
 import type { SqliteDatabase } from './db'
@@ -48,7 +51,7 @@ const ResolveInputSchema = z.object({
 
 const SECURITY_HEADERS: Record<string, string> = {
   'content-security-policy':
-    "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'",
+    "default-src 'none'; style-src 'unsafe-inline'; font-src 'self'; form-action 'self'; base-uri 'none'",
   'referrer-policy': 'no-referrer',
   'x-content-type-options': 'nosniff',
   'x-robots-tag': 'noindex, nofollow',
@@ -100,7 +103,7 @@ function wantsJson(req: IncomingMessage, pathname: string): boolean {
 function send(
   res: ServerResponse,
   status: number,
-  body: string,
+  body: string | Buffer,
   headers: Record<string, string>
 ): void {
   res.writeHead(status, { ...SECURITY_HEADERS, ...headers })
@@ -249,6 +252,12 @@ export function createOutboxServer(deps: OutboxServerDeps): Server {
   const now = deps.now ?? (() => Date.now())
   const brand = deps.brand
   const log = createLog(deps.log ?? ((line) => process.stdout.write(line + '\n')))
+  const fontDirectory = join(dirname(fileURLToPath(import.meta.url)), 'assets', 'fonts')
+  const fontNames = new Set(
+    readdirSync(fontDirectory, { withFileTypes: true })
+      .filter((entry) => entry.isFile() && entry.name.endsWith('.woff2'))
+      .map((entry) => entry.name)
+  )
 
   async function authenticate(
     req: IncomingMessage,
@@ -312,6 +321,15 @@ export function createOutboxServer(deps: OutboxServerDeps): Server {
     if (authHeader) logParts.push(`Authorization: ${authHeader}`)
     if (cookieHeaderValue) logParts.push(`Cookie: ${cookieHeaderValue}`)
     log(logParts.join(' '))
+
+    const fontRoute = /^\/assets\/fonts\/([^/]+)$/.exec(pathname)
+    if (method === 'GET' && fontRoute && fontNames.has(fontRoute[1]!)) {
+      send(res, 200, readFileSync(join(fontDirectory, fontRoute[1]!)), {
+        'content-type': 'font/woff2',
+        'cache-control': 'public, max-age=31536000, immutable'
+      })
+      return
+    }
 
     if (method === 'GET' && pathname === '/healthz') {
       const jwtOk = typeof deps.jwtSecret === 'string' && deps.jwtSecret !== ''

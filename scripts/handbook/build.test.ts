@@ -52,6 +52,41 @@ describe('handbook build discovery', () => {
     expect(() => discoverHandbook(join(root, 'screenshots'))).toThrow(/matching \.png is missing/)
   })
 
+  it('discovers a PNG without matching Markdown and reports it from the directory scan', () => {
+    const root = tempRoot()
+    const group = join(root, 'screenshots', 'chapter')
+    mkdirSync(group, { recursive: true })
+    writeFileSync(join(group, '_group.md'), '# Chapter\n')
+    writeFileSync(join(group, '01-image.png'), png())
+
+    expect(() => discoverHandbook(join(root, 'screenshots'), { minScreenshots: 0, minGroups: 0 }))
+      .toThrow(/01-image\.png: matching \.md is missing/)
+  })
+
+  it('rejects a group that has only _group.md', () => {
+    const root = tempRoot()
+    const group = join(root, 'screenshots', 'chapter')
+    mkdirSync(group, { recursive: true })
+    writeFileSync(join(group, '_group.md'), '# Chapter\n')
+
+    expect(() => discoverHandbook(join(root, 'screenshots'), { minScreenshots: 0, minGroups: 0 }))
+      .toThrow(/group has no screenshots/)
+  })
+
+  it('rejects screenshot names that collide after case folding', () => {
+    expect(findScreenshotPairErrors(
+      ['01-a.png', '01-A.png'],
+      ['01-a.md'],
+      'screenshots/chapter',
+    )).toContainEqual(expect.stringContaining('duplicate image names after case folding'))
+
+    expect(findScreenshotPairErrors(
+      ['01-a.png'],
+      ['01-a.md', '01-A.md'],
+      'screenshots/chapter',
+    )).toContainEqual(expect.stringContaining('duplicate text names after case folding'))
+  })
+
   it('requires each screenshot group to include its _group.md file', () => {
     const root = tempRoot()
     const group = join(root, 'screenshots', 'chapter')
@@ -95,6 +130,9 @@ describe('handbook build discovery', () => {
     expect(readPngDimensions(valid)).toEqual({ width: 760, height: 900 })
     expect(() => readPngDimensions(Buffer.alloc(1001))).toThrow(/PNG signature/)
     expect(() => readPngDimensions(png(500))).toThrow(/file is too small/)
+    const missingHeader = png()
+    missingHeader.fill(0, 12, 16)
+    expect(() => readPngDimensions(missingHeader)).toThrow('PNG has no IHDR header')
   })
 
   it('rejects an output directory inside the repository and its ancestors', () => {
@@ -145,6 +183,15 @@ describe('handbook build discovery', () => {
     expect(resolveOutputDirectory(output, repo)).toBe(join(realpathSync(root), 'built'))
   })
 
+  it('resolves a non-existent output directly under the filesystem root', () => {
+    const root = tempRoot()
+    const repo = join(root, 'repo')
+    mkdirSync(repo)
+    const output = `/outbox-root-output-${process.pid}`
+
+    expect(resolveOutputDirectory(output, repo)).toBe(output)
+  })
+
   it('builds one escaped h3 per screenshot and uses screenshot titles in the contents', () => {
     const root = tempRoot()
     const repo = join(root, 'repo')
@@ -152,12 +199,17 @@ describe('handbook build discovery', () => {
     const htmlSource = 'export const handbook = true\n'
     mkdirSync(screenshots, { recursive: true })
     mkdirSync(join(repo, 'src'), { recursive: true })
+    mkdirSync(join(repo, 'src/assets/fonts'), { recursive: true })
     mkdirSync(join(repo, 'docs/handbook'), { recursive: true })
     writeFileSync(join(repo, 'src/html.ts'), htmlSource)
     writeFileSync(join(repo, 'docs/handbook/intro.md'), '# Introduction\n')
     writeFileSync(join(repo, 'docs/handbook/screenshots/capture.json'), JSON.stringify({
       htmlSha256: createHash('sha256').update(htmlSource).digest('hex')
     }))
+    for (const font of ['Inter-Regular.woff2', 'Inter-SemiBold.woff2', 'Inter-Bold.woff2']) {
+      writeFileSync(join(repo, 'src/assets/fonts', font), `font:${font}`)
+    }
+    writeFileSync(join(repo, 'src/assets/fonts/Inter-LICENSE.txt'), 'OFL license')
     writeFileSync(join(screenshots, '_group.md'), '# Chapter\n\nChapter introduction.')
 
     const png = Buffer.alloc(1001)
@@ -170,14 +222,31 @@ describe('handbook build discovery', () => {
     writeFileSync(join(screenshots, '02-second.png'), png)
     writeFileSync(join(screenshots, '02-second.md'), '# Second view\n\nDescription two.')
 
-    const { outputDir } = buildHandbook(repo, join(root, 'output'), { minScreenshots: 0, minGroups: 0 })
+    const { outputDir, manifest } = buildHandbook(repo, join(root, 'output'), { minScreenshots: 0, minGroups: 0 })
     const html = readFileSync(join(outputDir, 'index.html'), 'utf8')
+    const css = readFileSync(join(outputDir, 'handbook.css'), 'utf8')
+    const manifestFonts = manifest.artifacts.filter((artifact) => artifact.category === 'font')
+    const manifestLicense = manifest.artifacts.find((artifact) => artifact.category === 'license')
     expect([...html.matchAll(/<h3>/g)]).toHaveLength(2)
     expect(html).toContain('<h3>First &lt;view&gt;</h3>')
     expect(html).toContain('<h3>Second view</h3>')
     expect(html).toContain('>First &lt;view&gt;</a>')
     expect(html).toContain('>Second view</a>')
     expect(html).toContain('<strong>one</strong>')
+    expect([...html.matchAll(/<h1\b/g)]).toHaveLength(1)
+    expect(html).toContain("font-src 'self'")
+    expect(css).toContain('assets/fonts/Inter-Regular.woff2')
+    expect(manifestFonts.map((font) => font.outputPath)).toEqual([
+      'assets/fonts/Inter-Bold.woff2',
+      'assets/fonts/Inter-Regular.woff2',
+      'assets/fonts/Inter-SemiBold.woff2'
+    ])
+    expect(manifestLicense?.outputPath).toBe('assets/fonts/Inter-LICENSE.txt')
+    for (const font of manifestFonts) {
+      expect(readFileSync(join(outputDir, font.outputPath), 'utf8')).toBe(
+        readFileSync(join(repo, font.source), 'utf8')
+      )
+    }
   })
 
   it('uses production screenshot floors when buildHandbook options are omitted', () => {
@@ -201,5 +270,30 @@ describe('handbook build discovery', () => {
 
     expect(() => buildHandbook(repo, join(root, 'output')))
       .toThrow(`Screenshot floor not met: 2 < ${MIN_SCREENSHOTS}`)
+  })
+
+  it('preserves the existing output when a discovered PNG is invalid', () => {
+    const root = tempRoot()
+    const repo = join(root, 'repo')
+    const screenshots = join(repo, 'docs/handbook/screenshots/chapter')
+    const htmlSource = 'export const handbook = true\n'
+    mkdirSync(screenshots, { recursive: true })
+    mkdirSync(join(repo, 'src'), { recursive: true })
+    mkdirSync(join(repo, 'docs/handbook'), { recursive: true })
+    writeFileSync(join(repo, 'src/html.ts'), htmlSource)
+    writeFileSync(join(repo, 'docs/handbook/intro.md'), '# Introduction\n')
+    writeFileSync(join(repo, 'docs/handbook/screenshots/capture.json'), JSON.stringify({
+      htmlSha256: createHash('sha256').update(htmlSource).digest('hex')
+    }))
+    writeFileSync(join(screenshots, '_group.md'), '# Chapter\n')
+    writeFileSync(join(screenshots, '01-invalid.png'), png().fill(0, 12, 16))
+    writeFileSync(join(screenshots, '01-invalid.md'), '# Invalid screenshot\n')
+    const output = join(root, 'output')
+    mkdirSync(output)
+    writeFileSync(join(output, 'marker.txt'), 'keep this output')
+
+    expect(() => buildHandbook(repo, output, { minScreenshots: 0, minGroups: 0 }))
+      .toThrow('PNG has no IHDR header')
+    expect(readFileSync(join(output, 'marker.txt'), 'utf8')).toBe('keep this output')
   })
 })

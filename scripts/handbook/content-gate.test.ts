@@ -38,6 +38,10 @@ describe('handbook content gate rules', () => {
     expect(comparePngSets(['screenshots/a.png'], ['screenshots/b.png'])).toContain('manifest image missing on disk: screenshots/a.png')
     expect(comparePngSets([], [])).toContain('the built image set is empty')
     expect(comparePngSets([], ['screenshots/orphan.png'])).toContain('unmanifested image on disk: screenshots/orphan.png')
+    expect(comparePngSets(
+      ['screenshots/page.png', 'assets/fonts/Inter-Regular.woff2'],
+      ['screenshots/page.png', 'assets/fonts/Inter-Regular.woff2']
+    )).toEqual([])
   })
 
   it('requires allowlisted QR entries to have both a file and a decoded payload', () => {

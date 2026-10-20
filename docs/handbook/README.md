@@ -31,3 +31,5 @@ Known gaps (3 variants in 3 causes):
 - Gap 3 — Results and errors, internal error: reaching this response requires failure injection in an application handler; the capture uses the real service without such injection.
 
 Hosting is not deployed; where it is served is not decided yet.
+
+The “Review pack is missing” screenshot uses a separate service instance with its own database and a content directory without `rules.json`.

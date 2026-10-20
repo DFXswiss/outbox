@@ -1,7 +1,8 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import type { Server } from 'node:http'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { afterEach, describe, expect, it } from 'vitest'
 import { openDatabase, type SqliteDatabase } from './db'
 import { submitSubmission } from './entries'
@@ -51,6 +52,7 @@ type Harness = {
 }
 
 const harnesses: Harness[] = []
+const FONT_DIRECTORY = join(dirname(fileURLToPath(import.meta.url)), 'assets', 'fonts')
 
 function assertServerRequiresBrand(
   deps: Omit<OutboxServerDeps, 'brand'>
@@ -1131,5 +1133,36 @@ describe('unreadable cookie', () => {
 describe('review scope caption', () => {
   it('names the listed provisional check and withholds factual truth of numbers, names and claims', () => {
     expectReviewScopeMeaning(REVIEW_SCOPE)
+  })
+})
+
+describe('font assets', () => {
+  it('serves discovered woff2 files publicly with immutable caching and security headers', async () => {
+    const h = await start()
+    const response = await fetch(`http://127.0.0.1:${h.port}/assets/fonts/Inter-Regular.woff2`)
+    const bytes = Buffer.from(await response.arrayBuffer())
+
+    expect(response.status).toBe(200)
+    expect(bytes.equals(readFileSync(join(FONT_DIRECTORY, 'Inter-Regular.woff2')))).toBe(true)
+    expect(response.headers.get('content-type')).toBe('font/woff2')
+    expect(response.headers.get('cache-control')).toBe('public, max-age=31536000, immutable')
+    expect(response.headers.get('content-security-policy')).toContain("font-src 'self'")
+    expect(response.headers.get('content-security-policy')).toContain("default-src 'none'")
+  })
+
+  it('returns 404 for unknown, traversing, encoded-slash, non-woff2, and license files', async () => {
+    const h = await start()
+    for (const name of ['missing.woff2', '..%2fserver.ts', 'Inter-Regular.ttf', 'Inter-LICENSE.txt']) {
+      const response = await fetch(`http://127.0.0.1:${h.port}/assets/fonts/${name}`)
+      expect(response.status).toBe(404)
+    }
+  })
+
+  it('references the served Inter regular font from the composer page', async () => {
+    const h = await start()
+    const response = await call(h.port, '/', { token: TOKEN_A })
+    expect(response.status).toBe(200)
+    expect(response.text).toContain('@font-face')
+    expect(response.text).toContain('/assets/fonts/Inter-Regular.woff2')
   })
 })

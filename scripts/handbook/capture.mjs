@@ -1,4 +1,4 @@
-import { createHash, createHmac, randomUUID } from 'node:crypto'
+import { createHash, createHmac } from 'node:crypto'
 import { createServer } from 'node:http'
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -292,8 +292,6 @@ async function captureStaticErrors(composer, approver) {
 }
 
 async function main() {
-  const require = createRequire(join(repoRoot, '_handbook-deps', 'package.json'))
-  void require
   const { chromium } = await playwright()
   for (const group of readdirSync(outputRoot, { withFileTypes: true })) {
     if (!group.isDirectory()) continue

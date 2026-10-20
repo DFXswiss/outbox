@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
-import { mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { dirname, extname, isAbsolute, join, relative, resolve, sep } from 'node:path'
+import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { renderMarkdown } from './markdown'
 
@@ -94,7 +94,7 @@ export function resolveOutputDirectory(outputDir: string, repoRoot: string): str
     } catch {
       const parent = dirname(cursor)
       if (parent === cursor) throw new Error(`Cannot resolve output directory: ${outputDir}`)
-      suffix.push(cursor.slice(parent.length + 1))
+      suffix.push(basename(cursor))
       cursor = parent
     }
   }
@@ -130,7 +130,14 @@ export function readPngDimensions(data: Buffer): { width: number; height: number
 }
 
 function stylesheet(): string {
-  return `*{box-sizing:border-box}body{margin:0;color:#172033;background:#f3f5f8;font:16px/1.6 system-ui,sans-serif}main{max-width:1100px;margin:0 auto;padding:2rem}nav,article,figure{background:#fff;border:1px solid #d9e0ea;border-radius:12px;padding:1rem;margin:1rem 0}nav ul{columns:2}a{color:#174ea6}img{display:block;max-width:100%;height:auto;margin:auto}figcaption{margin-top:1rem}h1,h2{line-height:1.2}code{background:#edf0f4;padding:.1em .3em;border-radius:4px}@media(max-width:640px){main{padding:1rem}nav ul{columns:1}}`
+  return `@font-face{font-family:Inter;src:url("assets/fonts/Inter-Regular.woff2") format("woff2");font-style:normal;font-weight:400;font-display:swap}
+@font-face{font-family:Inter;src:url("assets/fonts/Inter-SemiBold.woff2") format("woff2");font-style:normal;font-weight:600;font-display:swap}
+@font-face{font-family:Inter;src:url("assets/fonts/Inter-Bold.woff2") format("woff2");font-style:normal;font-weight:700;font-display:swap}
+:root{color-scheme:light;--bg:#f6f8fc;--surface:#fff;--surface-soft:#eef3fa;--text:#0b1426;--text-secondary:#566174;--text-muted:#8d98aa;--border:#dde5f0;--primary:#1e6ef7;--primary-soft:#e6f0ff;--link:#174ea6;--success:#16a34a;--warning:#8a5a00;--error:#dc2626;--space-1:4px;--space-2:8px;--space-3:12px;--space-4:16px;--space-5:24px;--space-6:32px;--radius-sm:6px;--radius-md:10px;--radius-lg:16px;--shadow-card:0 6px 20px rgba(11,20,38,.05)}
+*{box-sizing:border-box}body{margin:0;color:var(--text);background:var(--bg);font:16px/1.6 Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;-webkit-font-smoothing:antialiased}main{max-width:1100px;margin:0 auto;padding:var(--space-6) var(--space-5)}
+.brand{display:flex;align-items:center;gap:var(--space-3);margin-bottom:var(--space-5);color:var(--text-secondary);font-size:14px;font-weight:600}.brand svg{display:block;width:77px;height:24px}
+nav,article,figure{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-lg);box-shadow:var(--shadow-card);padding:var(--space-5);margin:var(--space-4) 0}nav ul{columns:2;column-gap:var(--space-6)}nav li{break-inside:avoid;margin:0 0 var(--space-2)}a{color:var(--link);text-underline-offset:3px}article{max-width:70ch}figure{margin-top:var(--space-4)}img{display:block;width:100%;max-width:100%;height:auto;border-radius:var(--radius-md)}figcaption{max-width:70ch;margin:var(--space-4) auto 0}h1,h2,h3{line-height:1.25;letter-spacing:-.02em}h1{font-size:30px}h2{font-size:22px}code{background:var(--surface-soft);padding:.1em .3em;border-radius:var(--radius-sm)}
+@media(max-width:640px){main{padding:var(--space-4)}nav,article,figure{padding:var(--space-4)}nav ul{columns:1}}`
 }
 
 export function verifyReferences(html: string, outputDir: string): void {
@@ -172,24 +179,51 @@ export function buildHandbook(
   options: { minScreenshots?: number; minGroups?: number } = {}
 ): { outputDir: string; manifest: { artifacts: Artifact[] } } {
   const outputDir = resolveOutputDirectory(requestedOutput, repoRoot)
-  rmSync(outputDir, { recursive: true, force: true })
-  mkdirSync(join(outputDir, 'screenshots'), { recursive: true })
   const htmlSource = join(repoRoot, 'src/html.ts')
   const capturePath = join(repoRoot, 'docs/handbook/screenshots/capture.json')
   const capture = JSON.parse(readFileSync(capturePath, 'utf8')) as { htmlSha256?: string }
   if (capture.htmlSha256 !== sha256(readFileSync(htmlSource))) throw new Error('screenshots are stale, run the capture')
   const discovered = discoverHandbook(join(repoRoot, 'docs/handbook/screenshots'), options)
+  const fontSourceDir = join(repoRoot, 'src/assets/fonts')
+  const fontFiles = existsSync(fontSourceDir)
+    ? readdirSync(fontSourceDir, { withFileTypes: true }).filter((entry) => entry.isFile() && (entry.name.endsWith('.woff2') || entry.name === 'Inter-LICENSE.txt')).map((entry) => entry.name).sort()
+    : []
+  mkdirSync(dirname(outputDir), { recursive: true })
+  let temporaryDir = mkdtempSync(join(dirname(outputDir), `.${basename(outputDir)}-tmp-`))
+  const backupCandidate = () => mkdtempSync(join(dirname(outputDir), `.${basename(outputDir)}-backup-`))
+  try {
+    return buildInDirectory(repoRoot, outputDir, temporaryDir, discovered, fontSourceDir, fontFiles, backupCandidate)
+  } catch (error) {
+    if (temporaryDir && existsSync(temporaryDir)) rmSync(temporaryDir, { recursive: true, force: true })
+    throw error
+  }
+}
+
+function buildInDirectory(
+  repoRoot: string,
+  outputDir: string,
+  temporaryDir: string,
+  discovered: DiscoveredHandbook,
+  fontSourceDir: string,
+  fontFiles: string[],
+  backupCandidate: () => string
+): { outputDir: string; manifest: { artifacts: Artifact[] } } {
+  mkdirSync(join(temporaryDir, 'screenshots'), { recursive: true })
   const artifacts: Artifact[] = []
   const destinations = new Map<string, string>()
   const addArtifact = (category: string, source: string, outputPath: string, data: Buffer) => {
     registerOutputDestination(destinations, outputPath, source)
-    const destination = join(outputDir, outputPath)
+    const destination = join(temporaryDir, outputPath)
     mkdirSync(dirname(destination), { recursive: true })
     writeFileSync(destination, data)
     artifacts.push({ category, source: relative(repoRoot, source).split(sep).join('/'), outputPath, sha256: sha256(data) })
   }
   const introPath = join(repoRoot, 'docs/handbook/intro.md')
   const introHtml = renderMarkdown(readFileSync(introPath, 'utf8'), introPath)
+  for (const fontFile of fontFiles) {
+    const category = fontFile.endsWith('.woff2') ? 'font' : 'license'
+    addArtifact(category, join(fontSourceDir, fontFile), `assets/fonts/${fontFile}`, readFileSync(join(fontSourceDir, fontFile)))
+  }
   const toc = discovered.groups.map((group) => `<li><a href="#${safeId(group.name)}">${escapeAttribute(group.title)}</a><ul>${group.images.map((image) => `<li><a href="#${safeId(`${group.name}-${image.name}`)}">${escapeAttribute(image.title)}</a></li>`).join('')}</ul></li>`).join('')
   const sections = discovered.groups.map((group) => {
     const groupTitle = group.title
@@ -204,17 +238,32 @@ export function buildHandbook(
     }).join('\n')
     return `<section id="${safeId(group.name)}"><h2>${escapeAttribute(groupTitle)}</h2>${renderMarkdown(groupIntro, join(repoRoot, 'docs/handbook/screenshots', group.name, '_group.md'))}${figures}</section>`
   }).join('\n')
-  const html = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="robots" content="noindex, nofollow"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src 'self'; style-src 'self'; base-uri 'none'; form-action 'none'"><title>Outbox handbook</title><link rel="stylesheet" href="handbook.css"></head><body><main><header><h1>Outbox handbook</h1></header><nav aria-label="Contents"><h2>Contents</h2><ul>${toc}</ul></nav><article>${introHtml}</article>${sections}</main></body></html>`
-  writeFileSync(join(outputDir, 'handbook.css'), stylesheet())
-  writeFileSync(join(outputDir, 'index.html'), html)
-  verifyReferences(html, outputDir)
+  const logo = '<svg viewBox="0 0 544 170" role="img" aria-label="DFX" xmlns="http://www.w3.org/2000/svg"><g clip-path="url(#dfx-handbook-clip)"><path fill-rule="evenodd" clip-rule="evenodd" d="M61.5031 0H124.245C170.646 0 208.267 36.5427 208.267 84.0393C208.267 131.536 169.767 170.018 122.288 170.018H61.5031V135.504H114.046C141.825 135.504 164.541 112.789 164.541 85.009C164.541 57.2293 141.825 34.5136 114.046 34.5136H61.5031V0ZM266.25 31.5686V76.4973H338.294V108.066H266.25V170H226.906V0H355.389V31.5686H266.25ZM495.76 170L454.71 110.975L414.396 170H369.216L432.12 83.5365L372.395 0H417.072L456.183 55.1283L494.557 0H537.061L477.803 82.082L541.191 170H495.778H495.76Z" fill="#072440"/><path d="M86.1582 126.274C109.821 126.274 129.004 107.092 129.004 83.4287C129.004 59.7657 109.821 40.583 86.1582 40.583C62.4952 40.583 43.3126 59.7657 43.3126 83.4287C43.3126 107.092 62.4952 126.274 86.1582 126.274Z" fill="url(#dfx-handbook-p0)"/><path d="M47.1374 132.146C73.1707 132.146 94.2748 111.042 94.2748 85.009C94.2748 58.9757 73.1707 37.8716 47.1374 37.8716C21.1041 37.8716 0 58.9757 0 85.009C0 111.042 21.1041 132.146 47.1374 132.146Z" fill="url(#dfx-handbook-p1)"/></g><defs><linearGradient id="dfx-handbook-p0" x1="122.111" y1="64.6777" x2="45.9618" y2="103.949" gradientUnits="userSpaceOnUse"><stop offset=".04" stop-color="#F5516C"/><stop offset=".14" stop-color="#C74863"/><stop offset=".31" stop-color="#853B57"/><stop offset=".44" stop-color="#55324E"/><stop offset=".55" stop-color="#382D49"/><stop offset=".61" stop-color="#2D2B47"/></linearGradient><linearGradient id="dfx-handbook-p1" x1="75.8868" y1="50.7468" x2="15.2815" y2="122.952" gradientUnits="userSpaceOnUse"><stop offset=".2" stop-color="#F5516C"/><stop offset="1" stop-color="#6B3753"/></linearGradient><clipPath id="dfx-handbook-clip"><rect width="541.174" height="170" fill="white"/></clipPath></defs></svg>'
+  const html = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="robots" content="noindex, nofollow"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src 'self'; style-src 'self'; font-src 'self'; base-uri 'none'; form-action 'none'"><title>Outbox handbook</title><link rel="stylesheet" href="handbook.css"></head><body><main><header class="brand">${logo}<span>Outbox handbook</span></header><nav aria-label="Contents"><h2>Contents</h2><ul>${toc}</ul></nav><article>${introHtml}</article>${sections}</main></body></html>`
+  writeFileSync(join(temporaryDir, 'handbook.css'), stylesheet())
+  writeFileSync(join(temporaryDir, 'index.html'), html)
+  verifyReferences(html, temporaryDir)
   artifacts.push({ category: 'handbook', source: 'docs/handbook/intro.md', outputPath: 'index.html', sha256: sha256(html) })
-  artifacts.push({ category: 'style', source: 'scripts/handbook/build.ts', outputPath: 'handbook.css', sha256: sha256(readFileSync(join(outputDir, 'handbook.css'))) })
+  artifacts.push({ category: 'style', source: 'scripts/handbook/build.ts', outputPath: 'handbook.css', sha256: sha256(readFileSync(join(temporaryDir, 'handbook.css'))) })
   for (const artifact of artifacts) {
-    if (!statExists(join(outputDir, artifact.outputPath))) throw new Error(`Manifest artifact is missing: ${artifact.outputPath}`)
+    if (!statExists(join(temporaryDir, artifact.outputPath))) throw new Error(`Manifest artifact is missing: ${artifact.outputPath}`)
   }
   const manifest = { artifacts }
-  writeFileSync(join(outputDir, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`)
+  writeFileSync(join(temporaryDir, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`)
+  let backupDir: string | null = null
+  if (existsSync(outputDir)) {
+    backupDir = backupCandidate()
+    rmSync(backupDir, { recursive: true, force: true })
+    renameSync(outputDir, backupDir)
+  }
+  try {
+    renameSync(temporaryDir, outputDir)
+    temporaryDir = ''
+  } catch (error) {
+    if (backupDir && existsSync(backupDir)) renameSync(backupDir, outputDir)
+    throw error
+  }
+  if (backupDir) rmSync(backupDir, { recursive: true, force: true })
   return { outputDir, manifest }
 }
 
