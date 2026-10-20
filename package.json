@@ -8,7 +8,9 @@
   "scripts": {
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
-    "start": "node --import tsx src/main.ts"
+    "start": "node --import tsx src/main.ts",
+    "handbook:build": "node --import tsx scripts/handbook/build.ts",
+    "handbook:gate": "node --import tsx scripts/handbook/content-gate.ts"
   },
   "dependencies": {
     "better-sqlite3": "^12.11.1",

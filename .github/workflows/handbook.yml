@@ -1,0 +1,38 @@
+name: Handbook
+
+on:
+  pull_request:
+  push:
+    branches:
+      - develop
+
+permissions:
+  contents: read
+
+jobs:
+  handbook:
+    name: Build and inspect handbook
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install
+        run: npm ci
+
+      - name: Install image inspection tools
+        run: sudo apt-get update && sudo apt-get install -y tesseract-ocr zbar-tools
+
+      - name: Show image inspection tool versions
+        run: tesseract --version && zbarimg --version
+
+      - name: Build handbook
+        run: npm run handbook:build -- "$RUNNER_TEMP/handbook"
+
+      - name: Check handbook content
+        run: npm run handbook:gate -- "$RUNNER_TEMP/handbook"

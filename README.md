@@ -261,6 +261,10 @@ Bundles and scheduled_posts store `authoredByUser` + `authoredByAccount` (JWT `u
 7. Retry does not retry `uncertain`.
 8. Boot probe `GET /2/users/me` matches the configured handle.
 
+## Handbook
+
+The operator handbook covers the composer, review states, and service responses. See [docs/handbook/README.md](docs/handbook/README.md) for coverage, regeneration, and content checks.
+
 ---
 
 ## Implementation plan

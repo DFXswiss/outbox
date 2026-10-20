@@ -13,5 +13,5 @@
     "verbatimModuleSyntax": true,
     "types": ["node"]
   },
-  "include": ["review/**/*.ts", "src/**/*.ts", "vitest.config.ts"]
+  "include": ["review/**/*.ts", "src/**/*.ts", "scripts/**/*.ts", "vitest.config.ts"]
 }

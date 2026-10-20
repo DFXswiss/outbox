@@ -1,4 +1,7 @@
 node_modules
+docs
+scripts
+_handbook-deps
 .git
 *.sqlite*
 coverage
