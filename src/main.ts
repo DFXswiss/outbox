@@ -1,6 +1,7 @@
 import { buildApp } from './app'
 import { loadConfig } from './config'
 import { openDatabase } from './db'
+import { shutdown as stopService } from './shutdown'
 import { seedCredentials } from './x-client'
 
 const loaded = loadConfig(process.env)
@@ -31,33 +32,13 @@ async function shutdown(): Promise<void> {
     return
   }
   stopping = true
-  try {
-    await publisher.stop()
-  } catch {
-    log('Publisher stop failed')
-  }
-  try {
-    const closed = new Promise<void>((resolve, reject) => {
-      server.close((error) => {
-        if (error) {
-          reject(error)
-        } else {
-          resolve()
-        }
-      })
-    })
-    server.closeAllConnections()
-    await closed
-  } catch {
-    log('Server close failed')
-  } finally {
-    try {
-      db.close()
-    } catch {
-      log('Database close failed')
-    }
-    process.exit(0)
-  }
+  await stopService({
+    server,
+    publisher,
+    db,
+    exit: (code) => process.exit(code),
+    log
+  })
 }
 
 process.once('SIGTERM', () => {

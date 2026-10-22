@@ -322,6 +322,30 @@ describe('X publisher client', () => {
     expect(response.result.error).not.toContain(basicValue)
   })
 
+  it('redacts overlapping tweet credentials without leaving a secret suffix', async () => {
+    const accessToken = 'prefix'
+    const refreshToken = 'prefix-sensitive-tail'
+    const clientSecret = 'test-client-secret'
+    const basicValue = Buffer.from(`test-client:${clientSecret}`).toString('base64')
+    db.prepare(
+      'UPDATE x_credentials SET accessToken = ?, refreshToken = ? WHERE id = 1'
+    ).run(accessToken, refreshToken)
+    const x = client(async () => json({
+      title: `Rejected ${refreshToken}`,
+      detail: `Access ${accessToken}; refresh ${refreshToken}; secret ${clientSecret}; basic ${basicValue}`
+    }, 403), { secret: clientSecret })
+
+    const response = await x.postTweet('hello', NOW + 20_000)
+    const error = response.result.error ?? ''
+
+    expect(error).toContain('HTTP 403')
+    expect(error).not.toContain(accessToken)
+    expect(error).not.toContain(refreshToken)
+    expect(error).not.toContain('-sensitive-tail')
+    expect(error).not.toContain(clientSecret)
+    expect(error).not.toContain(basicValue)
+  })
+
   it('does not refresh twice when the retried post also returns 401', async () => {
     let tweets = 0
     let tokens = 0

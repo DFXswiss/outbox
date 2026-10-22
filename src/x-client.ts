@@ -112,12 +112,28 @@ function errorDetail(
     }
   }
   let detail = values.join(': ').replace(/[\r\n\t]+/g, ' ')
-  for (const secret of secrets) {
-    if (secret) {
-      detail = detail.split(secret).join('[redacted]')
-    }
+  const uniqueSecrets = [...new Set(secrets.filter((secret) => secret.length > 0))]
+    .sort((left, right) => right.length - left.length)
+  for (const secret of uniqueSecrets) {
+    detail = detail.split(secret).join('[redacted]')
   }
   return detail.slice(0, 300)
+}
+
+function credentialSecrets(
+  accessToken: string | null,
+  refreshToken: string,
+  clientId: string,
+  clientSecret?: string
+): string[] {
+  return [
+    accessToken ?? '',
+    refreshToken,
+    clientSecret ?? '',
+    clientSecret
+      ? Buffer.from(`${clientId}:${clientSecret}`).toString('base64')
+      : ''
+  ]
 }
 
 function safeError(error: unknown): string {
@@ -195,14 +211,16 @@ export function createXClient(options: XClientOptions) {
         typeof (body as Record<string, unknown>).access_token !== 'string' ||
         (body as Record<string, unknown>).access_token === ''
       ) {
-        throw new Error(errorDetail(response.status, body, [
-          current.accessToken ?? '',
-          current.refreshToken,
-          options.clientSecret ?? '',
-          options.clientSecret
-            ? Buffer.from(`${options.clientId}:${options.clientSecret}`).toString('base64')
-            : ''
-        ]))
+        throw new Error(errorDetail(
+          response.status,
+          body,
+          credentialSecrets(
+            current.accessToken,
+            current.refreshToken,
+            options.clientId,
+            options.clientSecret
+          )
+        ))
       }
       const record = body as Record<string, unknown>
       const accessToken = record.access_token as string
@@ -376,10 +394,12 @@ export function createXClient(options: XClientOptions) {
             channel: 'x',
             ok: false,
             uncertain: true,
-            error: errorDetail(response.status, body, [
+            error: errorDetail(response.status, body, credentialSecrets(
               token,
-              loadCredentials(options.db)?.refreshToken ?? ''
-            ])
+              loadCredentials(options.db)?.refreshToken ?? '',
+              options.clientId,
+              options.clientSecret
+            ))
           },
           needsLogin: false
         }
@@ -394,10 +414,12 @@ export function createXClient(options: XClientOptions) {
         needsLogin: false
       }
     }
-    const error = errorDetail(response.status, body, [
+    const error = errorDetail(response.status, body, credentialSecrets(
       token,
-      loadCredentials(options.db)?.refreshToken ?? ''
-    ])
+      loadCredentials(options.db)?.refreshToken ?? '',
+      options.clientId,
+      options.clientSecret
+    ))
     if (
       (response.status >= 300 && response.status < 400) ||
       response.status >= 500 ||

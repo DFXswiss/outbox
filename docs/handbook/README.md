@@ -1,6 +1,6 @@
 # Handbook maintenance
 
-This handbook is built from the Markdown beside each captured screen. The build writes `index.html`, `handbook.css`, the screenshots and `manifest.json` into an output directory outside the repository. `capture.json` lists the sorted capture inputs in `inputs` and their SHA-256 digest in `inputsSha256`: every file under `src/` and `review/` except `*.test.ts`, plus `scripts/handbook/capture.mjs`. Changes to any of these files make the screenshots stale and require a new capture.
+This handbook is built from the Markdown beside each captured screen. The build writes `index.html`, `handbook.css`, the screenshots and `manifest.json` into an output directory outside the repository. `capture.json` lists the sorted capture inputs in `inputs` and their SHA-256 digest in `inputsSha256`: every file under `src/` and `review/` except `*.test.ts`, plus `scripts/handbook/capture-install.mjs` and `scripts/handbook/capture.mjs`. Changes to any of these files make the screenshots stale and require a new capture.
 
 ## Regenerate
 
