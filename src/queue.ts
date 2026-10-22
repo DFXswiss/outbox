@@ -211,43 +211,43 @@ export function resolveUncertain(
   return immediate<QueueMutation | { ok: true; status: 'sent' | 'failed' }>(
     db,
     () => {
-    const post = db.prepare(
-      'SELECT entryId FROM scheduled_posts WHERE id = ?'
-    ).get(input.postId) as { entryId: string } | undefined
-    const updated = db.prepare(
-      `UPDATE scheduled_posts SET status = ?, url = ?, updatedAt = ?
-       WHERE id = ? AND status = 'uncertain'`
-    ).run(
-      input.resolution,
-      input.resolution === 'sent' ? input.url ?? null : null,
-      input.now,
-      input.postId
-    )
-    if (updated.changes !== 1) {
+      const post = db.prepare(
+        'SELECT entryId FROM scheduled_posts WHERE id = ?'
+      ).get(input.postId) as { entryId: string } | undefined
+      const updated = db.prepare(
+        `UPDATE scheduled_posts SET status = ?, url = ?, updatedAt = ?
+         WHERE id = ? AND status = 'uncertain'`
+      ).run(
+        input.resolution,
+        input.resolution === 'sent' ? input.url ?? null : null,
+        input.now,
+        input.postId
+      )
+      if (updated.changes !== 1) {
+        writeAudit(db, {
+          at: input.now,
+          event: 'refused',
+          bundleId: null,
+          entryId: post?.entryId ?? null,
+          actorUser: input.actor.user,
+          actorAccount: input.actor.account,
+          reason: 'conflict'
+        })
+        return { ok: false, reason: 'conflict' }
+      }
+      const entry = db.prepare(
+        'SELECT bundleId FROM entries WHERE id = ?'
+      ).get(post!.entryId) as { bundleId: string }
       writeAudit(db, {
         at: input.now,
-        event: 'refused',
-        bundleId: null,
-        entryId: post?.entryId ?? null,
+        event: 'resolved',
+        bundleId: entry.bundleId,
+        entryId: post!.entryId,
         actorUser: input.actor.user,
         actorAccount: input.actor.account,
-        reason: 'conflict'
+        reason: input.resolution
       })
-      return { ok: false, reason: 'conflict' }
-    }
-    const entry = db.prepare(
-      'SELECT bundleId FROM entries WHERE id = ?'
-    ).get(post!.entryId) as { bundleId: string }
-    writeAudit(db, {
-      at: input.now,
-      event: 'resolved',
-      bundleId: entry.bundleId,
-      entryId: post!.entryId,
-      actorUser: input.actor.user,
-      actorAccount: input.actor.account,
-      reason: input.resolution
-    })
-    return { ok: true, status: input.resolution }
+      return { ok: true, status: input.resolution }
     }
   )
 }

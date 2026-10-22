@@ -32,7 +32,7 @@
     "src/time.ts",
     "src/x-client.ts"
   ],
-  "inputsSha256": "c6edcdb8f854dbbd5d2e54353f30d649e30f0a2c3432660916464dae0c11e214",
+  "inputsSha256": "22c4620b0acd246347783052775b9dec368af6067f34529e2c055abe615554de",
   "viewport": {
     "width": 760,
     "height": "visible body content + 24px"

@@ -6,6 +6,7 @@ export type ShutdownDependencies = {
   db: { close(): void }
   exit: (code: number) => void
   log: (line: string) => void
+  graceMs?: number
 }
 
 export async function shutdown({
@@ -13,7 +14,8 @@ export async function shutdown({
   publisher,
   db,
   exit,
-  log
+  log,
+  graceMs = 5000
 }: ShutdownDependencies): Promise<void> {
   const closed = new Promise<Error | undefined>((resolve) => {
     try {
@@ -34,8 +36,27 @@ export async function shutdown({
     log('Publisher stop failed')
   }
   try {
-    server.closeAllConnections()
-    const error = await closed
+    let graceTimer: ReturnType<typeof setTimeout> | undefined
+    const grace = new Promise<{ timedOut: true }>((resolve) => {
+      graceTimer = setTimeout(() => resolve({ timedOut: true }), graceMs)
+      graceTimer.unref()
+    })
+    let outcome: { timedOut: true } | { timedOut: false; error: Error | undefined }
+    try {
+      outcome = await Promise.race([
+        closed.then((error) => ({ timedOut: false as const, error })),
+        grace
+      ])
+    } finally {
+      if (graceTimer) {
+        clearTimeout(graceTimer)
+      }
+    }
+    if (outcome.timedOut) {
+      // Let started requests receive their replies; runtime stop grace is at least 100 seconds.
+      server.closeAllConnections()
+    }
+    const error = outcome.timedOut ? await closed : outcome.error
     if (error) {
       throw error
     }

@@ -10,7 +10,10 @@ describe('service shutdown', () => {
     const server = {
       close(callback: (error?: Error) => void) {
         events.push('server.close')
-        completeClose = callback
+        completeClose = () => {
+          events.push('server.closed')
+          callback()
+        }
       },
       closeIdleConnections() {
         events.push('server.closeIdleConnections')
@@ -26,6 +29,7 @@ describe('service shutdown', () => {
       publisher: {
         async stop() {
           events.push('publisher.stop')
+          completeClose?.()
         }
       },
       db: {
@@ -45,37 +49,33 @@ describe('service shutdown', () => {
       'server.close',
       'server.closeIdleConnections',
       'publisher.stop',
-      'server.closeAllConnections',
+      'server.closed',
       'db.close',
       'exit:0'
     ])
   })
 
-  it('lets an active request finish during publisher stop and rejects a new connection', async () => {
+  it('lets an active request finish after publisher stop and rejects a new connection', async () => {
     let requestStarted!: () => void
     const started = new Promise<void>((resolve) => {
       requestStarted = resolve
     })
-    let finishRequest!: () => void
-    const finish = new Promise<void>((resolve) => {
-      finishRequest = resolve
-    })
-    let publisherStopping!: () => void
-    const stopping = new Promise<void>((resolve) => {
-      publisherStopping = resolve
-    })
-    let finishPublisherStop!: () => void
-    const finishPublisher = new Promise<void>((resolve) => {
-      finishPublisherStop = resolve
-    })
+    let requestEnded = false
+    let closeAllCalls = 0
 
     const server = createServer(async (_request, response) => {
       requestStarted()
       response.writeHead(200, { 'content-type': 'text/plain' })
       response.write('started:')
-      await finish
+      await new Promise((resolve) => setTimeout(resolve, 50))
+      requestEnded = true
       response.end('complete')
     })
+    const closeAll = server.closeAllConnections.bind(server)
+    server.closeAllConnections = () => {
+      closeAllCalls += 1
+      closeAll()
+    }
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
     const address = server.address() as AddressInfo
     const root = `http://127.0.0.1:${address.port}`
@@ -85,33 +85,60 @@ describe('service shutdown', () => {
       await started
       const shutdownTask = shutdown({
         server,
-        publisher: {
-          async stop() {
-            publisherStopping()
-            await finishPublisher
-          }
-        },
+        publisher: { async stop() {} },
         db: { close() {} },
         exit() {},
         log() {}
       })
-      await stopping
-
       await expect(fetch(`${root}/new`)).rejects.toThrow()
-      finishRequest()
       const response = await activeRequest
       expect(response.status).toBe(200)
       await expect(response.text()).resolves.toBe('started:complete')
+      expect(requestEnded).toBe(true)
+      expect(closeAllCalls).toBe(0)
 
-      finishPublisherStop()
       await shutdownTask
     } finally {
-      finishRequest()
-      finishPublisherStop()
       if (server.listening) {
         server.closeAllConnections()
         await new Promise<void>((resolve) => server.close(() => resolve()))
       }
     }
+  })
+
+  it('force closes a request that outlives the grace period', async () => {
+    const events: string[] = []
+    let completeClose: ((error?: Error) => void) | undefined
+    const server = {
+      close(callback: (error?: Error) => void) {
+        events.push('server.close')
+        completeClose = callback
+      },
+      closeIdleConnections() {
+        events.push('server.closeIdleConnections')
+      },
+      closeAllConnections() {
+        events.push('server.closeAllConnections')
+        completeClose?.()
+      }
+    } as unknown as Server
+
+    await shutdown({
+      server,
+      publisher: { async stop() { events.push('publisher.stop') } },
+      db: { close() { events.push('db.close') } },
+      exit(code) { events.push(`exit:${code}`) },
+      log(line) { events.push(`log:${line}`) },
+      graceMs: 100
+    })
+
+    expect(events).toEqual([
+      'server.close',
+      'server.closeIdleConnections',
+      'publisher.stop',
+      'server.closeAllConnections',
+      'db.close',
+      'exit:0'
+    ])
   })
 })
