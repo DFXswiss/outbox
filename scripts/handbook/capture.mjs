@@ -1,11 +1,13 @@
+// JavaScript lets capture load Playwright from its isolated dependency directory, outside package.json resolution.
 import { createHash, createHmac } from 'node:crypto'
 import { createServer } from 'node:http'
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { createRequire } from 'node:module'
 import { spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
+import { installCapture } from './capture-install.mjs'
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..')
 const finalOutputRoot = join(repoRoot, 'docs/handbook/screenshots')
@@ -26,6 +28,7 @@ let tempRoots = []
 let appPort
 let stubPort
 let written = []
+let preservedStageRoot = null
 let xTweetSequence = 1_000_000_000
 const xResponses = new Map([
   ['The shipment update is ready for review.', 'flight'],
@@ -180,27 +183,25 @@ async function pageHeight(page) {
 
 const allDecisionButtons = ['Approve', 'Reject', 'Retry', 'Mark as sent', 'Mark as failed']
 const stateButtonPolicy = {
-  '02-review-approver/01-submitted-clear': { requiredButtons: ['Approve', 'Reject'] },
-  '02-review-approver/02-submitted-hints': { requiredButtons: ['Approve', 'Reject'] },
-  '02-review-approver/03-submitted-past': { requiredButtons: ['Reject'], forbiddenButtons: ['Approve'] },
-  '02-review-approver/07-failed': { requiredButtons: ['Retry'], forbiddenButtons: ['Mark as sent', 'Mark as failed', 'Approve', 'Reject'] },
-  '02-review-approver/08-uncertain': { requiredButtons: ['Mark as sent', 'Mark as failed'], forbiddenButtons: ['Retry', 'Approve', 'Reject'] },
-  ...Object.fromEntries(['04-pending', '05-in-flight', '06-sent', '09-rejected', '10-retracted'].map((name) => [`02-review-approver/${name}`, { forbiddenButtons: allDecisionButtons }]))
+  '02-review-approver/01-submitted-clear': ['Approve', 'Reject'],
+  '02-review-approver/02-submitted-hints': ['Approve', 'Reject'],
+  '02-review-approver/03-submitted-past': ['Reject'],
+  '02-review-approver/07-failed': ['Retry'],
+  '02-review-approver/08-uncertain': ['Mark as sent', 'Mark as failed']
 }
 
-async function capture(page, group, name, expected, { write = true, requiredButtons, forbiddenButtons } = {}) {
+async function capture(page, group, name, expected, { write = true } = {}) {
   const content = await page.locator('body').innerText()
   for (const text of expected) if (!content.toLowerCase().includes(text.toLowerCase())) fail(`${group}/${name}: expected page text ${JSON.stringify(text)}; got ${JSON.stringify(content)}`)
-  const policy = stateButtonPolicy[`${group}/${name}`] ?? {}
-  const required = requiredButtons ?? policy.requiredButtons ?? []
-  const forbidden = forbiddenButtons ?? policy.forbiddenButtons ?? (group === '03-review-author' ? allDecisionButtons : [])
-  for (const label of required) {
+  const allowed = new Set(stateButtonPolicy[`${group}/${name}`] ?? [])
+  for (const label of allDecisionButtons) {
     const count = await page.getByRole('button', { name: label, exact: true }).count()
-    if (count === 0) fail(`${group}/${name}: required button ${JSON.stringify(label)} is missing`)
+    const expectedCount = allowed.has(label) ? 1 : 0
+    if (count !== expectedCount) fail(`${group}/${name}: expected ${expectedCount} button(s) named ${JSON.stringify(label)}, found ${count}`)
   }
-  for (const label of forbidden) {
-    const count = await page.getByRole('button', { name: label, exact: true }).count()
-    if (count > 0) fail(`${group}/${name}: forbidden button ${JSON.stringify(label)} is present`)
+  if (group === '01-composer') {
+    const submitCount = await page.getByRole('button', { name: 'Submit for approval', exact: true }).count()
+    if (submitCount !== 1) fail(`${group}/${name}: expected exactly one Submit for approval button, found ${submitCount}`)
   }
   await pageHeight(page)
   const image = join(outputRoot, group, `${name}.png`)
@@ -237,7 +238,7 @@ function captureInputs() {
     if (entry.isDirectory()) return walk(path)
     return entry.isFile() && !entry.name.endsWith('.test.ts') ? [path] : []
   })
-  return [...walk('src'), ...walk('review'), 'scripts/handbook/capture.mjs'].sort((left, right) => left.localeCompare(right, 'en'))
+  return [...walk('src'), ...walk('review'), 'scripts/handbook/capture-install.mjs', 'scripts/handbook/capture.mjs'].sort((left, right) => left.localeCompare(right, 'en'))
 }
 
 function pngPaths(root, prefix = '') {
@@ -249,39 +250,23 @@ function pngPaths(root, prefix = '') {
   })
 }
 
-function installCapture(stageRoot, stagedPngs, metadataPath) {
-  const backupRoot = join(stageRoot, 'backup')
-  mkdirSync(backupRoot, { recursive: true })
+function installStagedCapture(stageRoot, stagedPngs, metadataPath) {
   const previousPngs = pngPaths(finalOutputRoot)
-  const previousFiles = [...previousPngs.map((path) => `${finalOutputRoot}/${path}`), join(finalOutputRoot, 'capture.json')]
-  const backedUp = []
-  const installed = []
-  try {
-    for (const source of previousFiles) {
-      if (!existsSync(source)) continue
-      const relativePath = source.slice(finalOutputRoot.length + 1)
-      const backup = join(backupRoot, relativePath)
-      mkdirSync(dirname(backup), { recursive: true })
-      renameSync(source, backup)
-      backedUp.push({ source, backup })
-    }
-    for (const relativePath of stagedPngs) {
-      const source = join(outputRoot, relativePath)
-      const destination = join(finalOutputRoot, relativePath)
-      mkdirSync(dirname(destination), { recursive: true })
-      renameSync(source, destination)
-      installed.push(destination)
-    }
-    renameSync(metadataPath, join(finalOutputRoot, 'capture.json'))
-    installed.push(join(finalOutputRoot, 'capture.json'))
-  } catch (error) {
-    for (const path of installed) rmSync(path, { force: true })
-    for (const { source, backup } of backedUp.reverse()) {
-      mkdirSync(dirname(source), { recursive: true })
-      if (existsSync(backup)) renameSync(backup, source)
-    }
-    throw error
-  }
+  const previousFiles = [
+    ...previousPngs.map((relativePath) => ({ source: join(finalOutputRoot, relativePath), relativePath })),
+    { source: join(finalOutputRoot, 'capture.json'), relativePath: 'capture.json' }
+  ]
+  const stagedFiles = stagedPngs.map((relativePath) => ({
+    source: join(outputRoot, relativePath),
+    destination: join(finalOutputRoot, relativePath)
+  }))
+  installCapture({
+    stageRoot,
+    previousFiles,
+    stagedFiles,
+    metadataSource: metadataPath,
+    metadataDestination: join(finalOutputRoot, 'capture.json')
+  })
 }
 
 async function submit(composer, text, time = zonedDate(10, true)) {
@@ -498,13 +483,14 @@ async function main() {
     fail('Staged capture.json failed validation')
   }
   written = pngs.map((path) => join(outputRoot, path))
-  installCapture(stageRoot, pngs, metadataPath)
+  installStagedCapture(stageRoot, pngs, metadataPath)
   process.stdout.write(`Captured ${written.length} screenshots\n`)
 }
 
 try {
   await main()
 } catch (error) {
+  if (error?.preserveStageRoot) preservedStageRoot = error.preserveStageRoot
   process.stderr.write(`${error instanceof Error ? error.stack ?? error.message : String(error)}\n`)
   process.exitCode = 1
 } finally {
@@ -517,5 +503,5 @@ try {
     }
   }
   if (stub) await new Promise((resolvePromise) => stub.close(resolvePromise))
-  for (const tempRoot of tempRoots) rmSync(tempRoot, { recursive: true, force: true })
+  for (const tempRoot of tempRoots) if (tempRoot !== preservedStageRoot) rmSync(tempRoot, { recursive: true, force: true })
 }

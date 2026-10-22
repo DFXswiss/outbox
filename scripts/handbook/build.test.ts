@@ -23,8 +23,8 @@ function png(size = 1001): Buffer {
 }
 
 function writePreviousBuild(dir: string): void {
-  mkdirSync(dir)
-  writeFileSync(join(dir, 'manifest.json'), JSON.stringify({ artifacts: [{ outputPath: 'index.html' }] }))
+  mkdirSync(dir, { recursive: true })
+  writeFileSync(join(dir, 'manifest.json'), JSON.stringify({ generator: 'outbox-handbook', manifestVersion: 1, artifacts: [{ outputPath: 'index.html' }, { outputPath: 'marker.txt' }] }))
   writeFileSync(join(dir, 'marker.txt'), 'keep this output')
 }
 
@@ -126,6 +126,72 @@ describe('handbook build discovery', () => {
     expect(readFileSync(join(output, 'important.txt'), 'utf8')).toBe('preserve me')
   })
 
+  it('preserves an unrelated directory with a forged handbook artifact entry', () => {
+    const root = tempRoot()
+    const repo = captureRepo(root)
+    const output = join(root, 'documents')
+    mkdirSync(output)
+    const manifest = JSON.stringify({ artifacts: [{ outputPath: 'index.html' }] })
+    writeFileSync(join(output, 'manifest.json'), manifest)
+    writeFileSync(join(output, 'important.txt'), 'preserve me')
+
+    expect(() => buildHandbook(repo, output, { minScreenshots: 0, minGroups: 0 }))
+      .toThrow('Refusing to replace non-empty directory that is not a handbook build')
+    expect(readFileSync(join(output, 'manifest.json'), 'utf8')).toBe(manifest)
+    expect(readFileSync(join(output, 'important.txt'), 'utf8')).toBe('preserve me')
+  })
+
+  it.each([
+    ['a missing generator', { manifestVersion: 1, artifacts: [{ outputPath: 'index.html' }, { outputPath: 'marker.txt' }] }],
+    ['an unrelated generator', { generator: 'other', manifestVersion: 1, artifacts: [{ outputPath: 'index.html' }, { outputPath: 'marker.txt' }] }],
+    ['an unsupported manifest version', { generator: 'outbox-handbook', manifestVersion: 2, artifacts: [{ outputPath: 'index.html' }, { outputPath: 'marker.txt' }] }],
+  ])('preserves a non-empty output with %s despite a complete artifact list', (_description, manifest) => {
+    const root = tempRoot()
+    const repo = captureRepo(root)
+    const output = join(root, 'documents')
+    mkdirSync(output)
+    const manifestContents = JSON.stringify(manifest)
+    writeFileSync(join(output, 'manifest.json'), manifestContents)
+    writeFileSync(join(output, 'index.html'), '<!doctype html><title>Existing handbook</title>')
+    writeFileSync(join(output, 'marker.txt'), 'preserve me')
+
+    expect(() => buildHandbook(repo, output, { minScreenshots: 0, minGroups: 0 }))
+      .toThrow('Refusing to replace non-empty directory that is not a handbook build')
+    expect(readFileSync(join(output, 'manifest.json'), 'utf8')).toBe(manifestContents)
+    expect(readFileSync(join(output, 'index.html'), 'utf8')).toBe('<!doctype html><title>Existing handbook</title>')
+    expect(readFileSync(join(output, 'marker.txt'), 'utf8')).toBe('preserve me')
+  })
+
+  it('refuses a marked handbook output with an unlisted file', () => {
+    const root = tempRoot()
+    const repo = captureRepo(root)
+    const output = join(root, 'documents')
+    writePreviousBuild(output)
+    mkdirSync(join(output, 'extra'), { recursive: true })
+    writeFileSync(join(output, 'extra', 'important.txt'), 'preserve me')
+
+    expect(() => buildHandbook(repo, output, { minScreenshots: 0, minGroups: 0 }))
+      .toThrow('Refusing to replace non-empty directory that is not a handbook build')
+    expect(readFileSync(join(output, 'marker.txt'), 'utf8')).toBe('keep this output')
+    expect(readFileSync(join(output, 'extra', 'important.txt'), 'utf8')).toBe('preserve me')
+  })
+
+  it('replaces a previous handbook build output directory', () => {
+    const root = tempRoot()
+    const repo = captureRepo(root)
+    writeCaptureMetadata(repo)
+    const output = join(root, 'documents')
+    buildHandbook(repo, output, { minScreenshots: 0, minGroups: 0 })
+    const replacement = buildHandbook(repo, output, { minScreenshots: 0, minGroups: 0 })
+
+    expect(replacement.outputDir).toBe(output)
+    expect(JSON.parse(readFileSync(join(output, 'manifest.json'), 'utf8'))).toMatchObject({
+      generator: 'outbox-handbook',
+      manifestVersion: 1
+    })
+    expect(readFileSync(join(output, 'index.html'), 'utf8')).toContain('Outbox handbook')
+  })
+
   it('refuses a symlink output directory', () => {
     const root = tempRoot()
     const repo = captureRepo(root)
@@ -143,7 +209,7 @@ describe('handbook build discovery', () => {
       writeCaptureMetadata(repo)
       const output = join(root, 'output')
       mkdirSync(output)
-      if (kind === 'previous handbook build') writeFileSync(join(output, 'manifest.json'), JSON.stringify({ artifacts: [{ outputPath: 'index.html' }] }))
+      if (kind === 'previous handbook build') writePreviousBuild(output)
       const result = buildHandbook(repo, output, { minScreenshots: 0, minGroups: 0 })
       expect(result.outputDir).toBe(output)
       expect(existsSync(join(output, 'index.html'))).toBe(true)

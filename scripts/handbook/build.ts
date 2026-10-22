@@ -13,6 +13,7 @@ export type Screenshot = { group: string; name: string; title: string; descripti
 export type ScreenshotGroup = { name: string; title: string; intro: string; images: Screenshot[] }
 export type DiscoveredHandbook = { groups: ScreenshotGroup[]; screenshots: Screenshot[] }
 export type Artifact = { category: string; source: string; outputPath: string; sha256: string }
+export type HandbookManifest = { generator: 'outbox-handbook'; manifestVersion: 1; artifacts: Artifact[] }
 
 function sha256(data: Buffer | string): string {
   return createHash('sha256').update(data).digest('hex')
@@ -28,7 +29,7 @@ function walkCaptureInputs(root: string, directory: string): string[] {
 }
 
 export function discoverCaptureInputs(repoRoot: string): string[] {
-  return [...walkCaptureInputs(repoRoot, 'src'), ...walkCaptureInputs(repoRoot, 'review'), 'scripts/handbook/capture.mjs'].sort((a, b) => a.localeCompare(b, 'en'))
+  return [...walkCaptureInputs(repoRoot, 'src'), ...walkCaptureInputs(repoRoot, 'review'), 'scripts/handbook/capture-install.mjs', 'scripts/handbook/capture.mjs'].sort((a, b) => a.localeCompare(b, 'en'))
 }
 
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..')
@@ -197,6 +198,32 @@ function statExists(path: string): boolean {
   try { return statSync(path).isFile() } catch { return false }
 }
 
+function isPreviousHandbookBuild(outputDir: string): boolean {
+  try {
+    const manifest = JSON.parse(readFileSync(join(outputDir, 'manifest.json'), 'utf8')) as {
+      generator?: unknown
+      manifestVersion?: unknown
+      artifacts?: Array<{ outputPath?: unknown }>
+    }
+    if (manifest.generator !== 'outbox-handbook' || manifest.manifestVersion !== 1 || !Array.isArray(manifest.artifacts)) return false
+    const artifactPaths = new Set(manifest.artifacts.map((artifact) => artifact?.outputPath).filter((path): path is string => typeof path === 'string'))
+    if (!artifactPaths.has('index.html')) return false
+    const actualFiles: string[] = []
+    const visit = (directory: string, prefix = '') => {
+      for (const entry of readdirSync(directory, { withFileTypes: true })) {
+        const path = prefix ? `${prefix}/${entry.name}` : entry.name
+        if (entry.isDirectory()) visit(join(directory, entry.name), path)
+        else if (entry.isFile()) actualFiles.push(path)
+        else throw new Error('Unexpected non-file entry')
+      }
+    }
+    visit(outputDir)
+    return actualFiles.every((path) => path === 'manifest.json' || artifactPaths.has(path))
+  } catch {
+    return false
+  }
+}
+
 export function registerOutputDestination(destinations: Map<string, string>, outputPath: string, source: string): void {
   const prior = destinations.get(outputPath)
   if (prior) throw new Error(`Duplicate output ${outputPath} from ${prior} and ${source}`)
@@ -207,7 +234,7 @@ export function buildHandbook(
   repoRoot: string,
   requestedOutput: string,
   options: { minScreenshots?: number; minGroups?: number; fs?: ExchangeFileSystem } = {}
-): { outputDir: string; manifest: { artifacts: Artifact[] } } {
+): { outputDir: string; manifest: HandbookManifest } {
   const exchangeFs = options.fs ?? fs
   let requestedStat: ReturnType<typeof lstatSync> | undefined
   try { requestedStat = lstatSync(resolve(requestedOutput)) } catch {}
@@ -220,12 +247,7 @@ export function buildHandbook(
     if (!statSync(outputDir).isDirectory()) throw new Error(`Output path is not a directory: ${outputDir}`)
     const contents = readdirSync(outputDir)
     if (contents.length > 0) {
-      let isPreviousBuild = false
-      try {
-        const manifest = JSON.parse(readFileSync(join(outputDir, 'manifest.json'), 'utf8')) as { artifacts?: Array<{ outputPath?: unknown }> }
-        isPreviousBuild = Array.isArray(manifest.artifacts) && manifest.artifacts.some((artifact) => artifact?.outputPath === 'index.html')
-      } catch {}
-      if (!isPreviousBuild) throw new Error(`Refusing to replace non-empty directory that is not a handbook build: ${outputDir}`)
+      if (!isPreviousHandbookBuild(outputDir)) throw new Error(`Refusing to replace non-empty directory that is not a handbook build: ${outputDir}`)
     }
   }
   const capturePath = join(repoRoot, 'docs/handbook/screenshots/capture.json')
@@ -264,7 +286,7 @@ function buildInDirectory(
   fontFiles: string[],
   backupCandidate: () => string,
   exchangeFs: ExchangeFileSystem
-): { outputDir: string; manifest: { artifacts: Artifact[] } } {
+): { outputDir: string; manifest: HandbookManifest } {
   mkdirSync(join(temporaryDir, 'screenshots'), { recursive: true })
   const artifacts: Artifact[] = []
   const destinations = new Map<string, string>()
@@ -305,7 +327,7 @@ function buildInDirectory(
   for (const artifact of artifacts) {
     if (!statExists(join(temporaryDir, artifact.outputPath))) throw new Error(`Manifest artifact is missing: ${artifact.outputPath}`)
   }
-  const manifest = { artifacts }
+  const manifest: HandbookManifest = { generator: 'outbox-handbook', manifestVersion: 1, artifacts }
   writeFileSync(join(temporaryDir, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`)
   let backupDir: string | null = null
   if (exchangeFs.existsSync(outputDir)) {

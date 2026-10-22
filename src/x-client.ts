@@ -197,7 +197,11 @@ export function createXClient(options: XClientOptions) {
       ) {
         throw new Error(errorDetail(response.status, body, [
           current.accessToken ?? '',
-          current.refreshToken
+          current.refreshToken,
+          options.clientSecret ?? '',
+          options.clientSecret
+            ? Buffer.from(`${options.clientId}:${options.clientSecret}`).toString('base64')
+            : ''
         ]))
       }
       const record = body as Record<string, unknown>

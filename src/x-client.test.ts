@@ -306,6 +306,22 @@ describe('X publisher client', () => {
     expect({ tweets, tokens }).toEqual({ tweets: 1, tokens: 1 })
   })
 
+  it('redacts the client secret and Basic credential value from refresh errors', async () => {
+    db.prepare('UPDATE x_credentials SET accessTokenExpiresAt = NULL WHERE id = 1').run()
+    const clientSecret = 'test-client-secret'
+    const basicValue = Buffer.from(`test-client:${clientSecret}`).toString('base64')
+    const x = client(async () => json({
+      title: `Rejected ${clientSecret}`,
+      detail: `Credential ${basicValue} was rejected`
+    }, 400), { secret: clientSecret })
+
+    const response = await x.postTweet('hello', NOW + 20_000)
+
+    expect(response.result.error).toContain('HTTP 400')
+    expect(response.result.error).not.toContain(clientSecret)
+    expect(response.result.error).not.toContain(basicValue)
+  })
+
   it('does not refresh twice when the retried post also returns 401', async () => {
     let tweets = 0
     let tokens = 0

@@ -5,6 +5,7 @@
     "review/README.md",
     "review/schema.ts",
     "review/xAlgorithm.ts",
+    "scripts/handbook/capture-install.mjs",
     "scripts/handbook/capture.mjs",
     "src/alerts.ts",
     "src/app.ts",
@@ -30,7 +31,7 @@
     "src/time.ts",
     "src/x-client.ts"
   ],
-  "inputsSha256": "46d5ee2990bacc8cb450bbae712b446991482c4b4a454d8ff8a12f6d311675b3",
+  "inputsSha256": "5d6df33e8a4997148b794760c53e1757fc449b23dbcae033d7b964bcfc8ed352",
   "viewport": {
     "width": 760,
     "height": "visible body content + 24px"
