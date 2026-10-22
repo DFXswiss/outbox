@@ -1,0 +1,3 @@
+# Failed
+
+The page shows the `approved` chip and the X channel card with a `failed` chip. The review check card says “No blocking findings and no hints.” and shows the review scope. There is no retry control in the composer view. An approver can retry the post.

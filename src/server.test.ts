@@ -1,13 +1,18 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import type { Server } from 'node:http'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { afterEach, describe, expect, it } from 'vitest'
 import { openDatabase, type SqliteDatabase } from './db'
 import { submitSubmission } from './entries'
 import { REVIEW_SCOPE } from './findings'
 import type { Identity, Introspect } from './identity'
-import { createOutboxServer, sessionCookie } from './server'
+import {
+  createOutboxServer,
+  sessionCookie,
+  type OutboxServerDeps
+} from './server'
 
 const NOW = Date.UTC(2023, 0, 1, 0, 0, 0)
 const CLEAN = 'The specification defines a design, not a live product.'
@@ -47,6 +52,16 @@ type Harness = {
 }
 
 const harnesses: Harness[] = []
+const FONT_DIRECTORY = join(dirname(fileURLToPath(import.meta.url)), 'assets', 'fonts')
+
+function assertServerRequiresBrand(
+  deps: Omit<OutboxServerDeps, 'brand'>
+): void {
+  // @ts-expect-error A server must receive its configured brand explicitly.
+  createOutboxServer(deps)
+}
+
+void assertServerRequiresBrand
 
 afterEach(async () => {
   while (harnesses.length > 0) {
@@ -81,6 +96,7 @@ async function start(
     jwtSecret?: string
     probeX?: () => 'ok' | 'bad'
     introspect?: Introspect
+    publisher?: { running(): boolean }
   } = {}
 ): Promise<Harness> {
   const dir = mkdtempSync(join(tmpdir(), 'outbox-surface-'))
@@ -105,11 +121,13 @@ async function start(
   const server = createOutboxServer({
     db,
     packRoot,
+    brand: 'dfx',
     introspect: opts.introspect ?? introspect,
     now: () => clock.now,
     jwtSecret: opts.jwtSecret ?? 'test-jwt-secret',
     log: (line) => logs.push(line),
-    probeX: opts.probeX
+    probeX: opts.probeX,
+    publisher: opts.publisher
   })
   const port = await listenZero(server)
   const harness: Harness = {
@@ -653,6 +671,420 @@ describe('healthz probes', () => {
       probes: { x: 'ok', jwt: 'ok' }
     })
   })
+
+  it('reports the injected publisher running state', async () => {
+    const h = await start({ probeX: () => 'ok', publisher: { running: () => true } })
+    const health = await call(h.port, '/healthz')
+    expect(health.json).toMatchObject({ queueRunning: true })
+  })
+
+  it('reports queueRunning false when an injected publisher is stopped', async () => {
+    const h = await start({ probeX: () => 'ok', publisher: { running: () => false } })
+    const health = await call(h.port, '/healthz')
+    expect(health.json).toMatchObject({ queueRunning: false })
+  })
+})
+
+describe('scheduled post recovery endpoints', () => {
+  async function queued(h: Harness, status: 'failed' | 'uncertain') {
+    const submitted = await submitJson(h.port, TOKEN_A, {
+      text: CLEAN,
+      scheduledAt: FUTURE_LOCAL
+    })
+    const created = submitted.json as { bundleId: string; entryId: string }
+    const approved = await call(h.port, `/review/${created.bundleId}/decide`, {
+      method: 'POST',
+      token: TOKEN_ADMIN,
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ decision: 'approve' })
+    })
+    expect(approved.status).toBe(200)
+    const row = h.db.prepare(
+      'SELECT id FROM scheduled_posts WHERE entryId = ?'
+    ).get(created.entryId) as { id: string }
+    h.db.prepare('UPDATE scheduled_posts SET status = ? WHERE id = ?').run(status, row.id)
+    return row.id
+  }
+
+  it('restricts retry and resolve to ADMIN and returns conflict on a repeated transition', async () => {
+    const h = await start()
+    const failedId = await queued(h, 'failed')
+    const denied = await call(
+      h.port,
+      `/api/posts/${failedId}/retry`,
+      { method: 'POST', token: TOKEN_A }
+    )
+    expect(denied.status).toBe(403)
+    const retried = await call(
+      h.port,
+      `/api/posts/${failedId}/retry`,
+      { method: 'POST', token: TOKEN_ADMIN }
+    )
+    expect(retried.status).toBe(200)
+    expect(retried.json).toEqual({ ok: true, status: 'pending' })
+    expect((await call(
+      h.port,
+      `/api/posts/${failedId}/retry`,
+      { method: 'POST', token: TOKEN_ADMIN }
+    )).status).toBe(409)
+
+    const uncertainId = await queued(h, 'uncertain')
+    const resolveDenied = await call(
+      h.port,
+      `/api/posts/${uncertainId}/resolve-uncertain`,
+      {
+        method: 'POST',
+        token: TOKEN_A,
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ resolution: 'failed' })
+      }
+    )
+    expect(resolveDenied.status).toBe(403)
+    const resolved = await call(
+      h.port,
+      `/api/posts/${uncertainId}/resolve-uncertain`,
+      {
+        method: 'POST',
+        token: TOKEN_ADMIN,
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          resolution: 'sent',
+          url: 'https://x.com/test_handle/status/1'
+        })
+      }
+    )
+    expect(resolved.status).toBe(200)
+    expect(resolved.json).toEqual({ ok: true, status: 'sent' })
+    expect((await call(
+      h.port,
+      `/api/posts/${uncertainId}/resolve-uncertain`,
+      {
+        method: 'POST',
+        token: TOKEN_ADMIN,
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ resolution: 'failed' })
+      }
+    )).status).toBe(409)
+  })
+
+  it('returns 404 for unknown retry and resolve post ids without changing the queue', async () => {
+    const h = await start()
+    await queued(h, 'uncertain')
+    const before = h.db.prepare(
+      'SELECT * FROM scheduled_posts ORDER BY id'
+    ).all()
+    const unknownId = 'missing-post-id'
+    const retry = await call(
+      h.port,
+      `/api/posts/${unknownId}/retry`,
+      { method: 'POST', token: TOKEN_ADMIN }
+    )
+    const resolve = await call(
+      h.port,
+      `/api/posts/${unknownId}/resolve-uncertain`,
+      {
+        method: 'POST',
+        token: TOKEN_ADMIN,
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ resolution: 'failed' })
+      }
+    )
+
+    expect(retry.status).toBe(404)
+    expect(resolve.status).toBe(404)
+    expect(h.db.prepare(
+      'SELECT * FROM scheduled_posts ORDER BY id'
+    ).all()).toEqual(before)
+  })
+
+  it('rejects foreign URL hosts and cookie mutations from a foreign Origin', async () => {
+    const h = await start()
+    const uncertainId = await queued(h, 'uncertain')
+    const badUrl = await call(
+      h.port,
+      `/api/posts/${uncertainId}/resolve-uncertain`,
+      {
+        method: 'POST',
+        token: TOKEN_ADMIN,
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          resolution: 'sent',
+          url: 'https://x.com.evil.invalid/test/status/1'
+        })
+      }
+    )
+    expect(badUrl.status).toBe(400)
+    const invalidUrls = [
+      'https://x.com/settings/security',
+      'https://x.com:444/a/status/1',
+      'https://user@x.com/a/status/1',
+      'https://user:password@x.com/a/status/1'
+    ]
+    for (const url of invalidUrls) {
+      const rejected = await call(
+        h.port,
+        `/api/posts/${uncertainId}/resolve-uncertain`,
+        {
+          method: 'POST',
+          token: TOKEN_ADMIN,
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ resolution: 'sent', url })
+        }
+      )
+      expect(rejected.status).toBe(400)
+    }
+    const acceptedSubdomain = await call(
+      h.port,
+      `/api/posts/${uncertainId}/resolve-uncertain`,
+      {
+        method: 'POST',
+        token: TOKEN_ADMIN,
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          resolution: 'sent',
+          url: 'https://www.x.com/test/status/123?s=20'
+        })
+      }
+    )
+    expect(acceptedSubdomain.status).toBe(200)
+    expect(
+      h.db.prepare('SELECT url FROM scheduled_posts WHERE id = ?')
+        .get(uncertainId)
+    ).toEqual({ url: 'https://www.x.com/test/status/123' })
+    const crossSite = await call(
+      h.port,
+      `/api/posts/${uncertainId}/resolve-uncertain`,
+      {
+        method: 'POST',
+        origin: 'https://evil.invalid',
+        headers: {
+          'content-type': 'application/json',
+          cookie: `outbox=${TOKEN_ADMIN}`
+        },
+        body: JSON.stringify({ resolution: 'failed' })
+      }
+    )
+    expect(crossSite.status).toBe(403)
+  })
+
+  it('rejects HTTP post URLs without resolving the uncertain post', async () => {
+    const h = await start()
+    const uncertainId = await queued(h, 'uncertain')
+    const response = await call(
+      h.port,
+      `/api/posts/${uncertainId}/resolve-uncertain`,
+      {
+        method: 'POST',
+        token: TOKEN_ADMIN,
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          resolution: 'sent',
+          url: 'http://x.com/test/status/1'
+        })
+      }
+    )
+
+    expect(response.status).toBe(400)
+    expect(
+      h.db.prepare('SELECT status, url FROM scheduled_posts WHERE id = ?')
+        .get(uncertainId)
+    ).toEqual({ status: 'uncertain', url: null })
+  })
+
+  it('allows resolving an uncertain post as sent without a URL', async () => {
+    const h = await start()
+    const postId = await queued(h, 'uncertain')
+    const resolved = await call(
+      h.port,
+      `/api/posts/${postId}/resolve-uncertain`,
+      {
+        method: 'POST',
+        token: TOKEN_ADMIN,
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ resolution: 'sent' })
+      }
+    )
+    expect(resolved.status).toBe(200)
+    expect(resolved.json).toEqual({ ok: true, status: 'sent' })
+    expect(
+      h.db.prepare('SELECT url FROM scheduled_posts WHERE id = ?').get(postId)
+    ).toEqual({ url: null })
+  })
+
+  it('allows resolving an uncertain post as sent with an empty form URL', async () => {
+    const h = await start()
+    const postId = await queued(h, 'uncertain')
+    const resolved = await call(
+      h.port,
+      `/api/posts/${postId}/resolve-uncertain`,
+      {
+        method: 'POST',
+        token: TOKEN_ADMIN,
+        headers: { 'content-type': 'application/x-www-form-urlencoded' },
+        body: 'resolution=sent&url='
+      }
+    )
+
+    expect(resolved.status).toBe(200)
+    expect(resolved.text).toContain('Post status: sent.')
+    expect(
+      h.db.prepare('SELECT status, url FROM scheduled_posts WHERE id = ?').get(postId)
+    ).toEqual({ status: 'sent', url: null })
+  })
+
+  it('allows resolving an uncertain post as failed with an empty form URL', async () => {
+    const h = await start()
+    const postId = await queued(h, 'uncertain')
+    const resolved = await call(
+      h.port,
+      `/api/posts/${postId}/resolve-uncertain`,
+      {
+        method: 'POST',
+        token: TOKEN_ADMIN,
+        headers: { 'content-type': 'application/x-www-form-urlencoded' },
+        body: 'resolution=failed&url='
+      }
+    )
+
+    expect(resolved.status).toBe(200)
+    expect(resolved.text).toContain('Post status: failed.')
+    expect(
+      h.db.prepare('SELECT status, url FROM scheduled_posts WHERE id = ?').get(postId)
+    ).toEqual({ status: 'failed', url: null })
+  })
+
+  it('returns HTML for retry and resolve form submissions', async () => {
+    const h = await start()
+    const failedId = await queued(h, 'failed')
+    const retry = await call(h.port, `/api/posts/${failedId}/retry`, {
+      method: 'POST',
+      token: TOKEN_ADMIN,
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      body: ''
+    })
+    expect(retry.status).toBe(200)
+    expect(retry.headers.get('content-type')).toContain('text/html')
+    expect(retry.text).toContain('Post status: pending.')
+
+    const uncertainId = await queued(h, 'uncertain')
+    const resolve = await call(
+      h.port,
+      `/api/posts/${uncertainId}/resolve-uncertain`,
+      {
+        method: 'POST',
+        token: TOKEN_ADMIN,
+        headers: { 'content-type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({ resolution: 'failed' }).toString()
+      }
+    )
+    expect(resolve.status).toBe(200)
+    expect(resolve.headers.get('content-type')).toContain('text/html')
+    expect(resolve.text).toContain('Post status: failed.')
+  })
+
+  it('shows channel state and admin recovery forms while GET leaves queue and audit unchanged', async () => {
+    const h = await start()
+    const postId = await queued(h, 'uncertain')
+    const snapshot = () => ({
+      posts: h.db.prepare('SELECT * FROM scheduled_posts ORDER BY id').all(),
+      audit: h.db.prepare('SELECT * FROM audit ORDER BY id').all()
+    })
+    const before = snapshot()
+    const list = await call(h.port, '/api/posts', { token: TOKEN_ADMIN })
+    expect(list.text).toContain(
+      `"channel":{"postId":"${postId}","channel":"x","status":"uncertain"`
+    )
+    const bundle = h.db.prepare(
+      `SELECT e.bundleId FROM scheduled_posts p
+       JOIN entries e ON e.id = p.entryId WHERE p.id = ?`
+    ).get(postId) as { bundleId: string }
+    const page = await call(h.port, `/review/${bundle.bundleId}`, { token: TOKEN_ADMIN })
+    expect(page.text).toContain('Mark as sent')
+    expect(page.text).toContain('Mark as failed')
+    const composer = await call(h.port, `/review/${bundle.bundleId}`, { token: TOKEN_A })
+    expect(composer.text).not.toContain('Mark as sent')
+    expect(composer.text).not.toContain('Mark as failed')
+    expect(snapshot()).toEqual(before)
+  })
+
+  it('creates scheduled posts only through the approve route', async () => {
+    const h = await start()
+    const countPosts = () => (
+      h.db.prepare('SELECT COUNT(*) AS n FROM scheduled_posts').get() as {
+        n: number
+      }
+    ).n
+
+    const submitted = await submitJson(h.port, TOKEN_ADMIN, {
+      text: CLEAN,
+      scheduledAt: FUTURE_LOCAL
+    })
+    const submission = submitted.json as { bundleId: string }
+    expect(countPosts()).toBe(0)
+
+    const reviewed = await call(h.port, '/api/review', {
+      method: 'POST',
+      token: TOKEN_ADMIN,
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ text: CLEAN })
+    })
+    expect(reviewed.status).toBe(200)
+    expect(countPosts()).toBe(0)
+
+    const retracted = await call(
+      h.port,
+      `/api/bundles/${submission.bundleId}/retract`,
+      { method: 'POST', token: TOKEN_ADMIN }
+    )
+    expect(retracted.status).toBe(200)
+    expect(countPosts()).toBe(0)
+
+    const approvable = await submitJson(h.port, TOKEN_ADMIN, {
+      text: CLEAN,
+      scheduledAt: FUTURE_LOCAL
+    })
+    const entry = approvable.json as { bundleId: string; entryId: string }
+    const decision = await call(
+      h.port,
+      `/review/${entry.bundleId}/decide`,
+      {
+        method: 'POST',
+        token: TOKEN_ADMIN,
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ decision: 'approve' })
+      }
+    )
+    expect(decision.status).toBe(200)
+    expect(countPosts()).toBe(1)
+    const post = h.db.prepare(
+      'SELECT id FROM scheduled_posts WHERE entryId = ?'
+    ).get(entry.entryId) as { id: string }
+
+    h.db.prepare("UPDATE scheduled_posts SET status = 'failed' WHERE id = ?")
+      .run(post.id)
+    const retried = await call(
+      h.port,
+      `/api/posts/${post.id}/retry`,
+      { method: 'POST', token: TOKEN_ADMIN }
+    )
+    expect(retried.status).toBe(200)
+    expect(countPosts()).toBe(1)
+
+    h.db.prepare("UPDATE scheduled_posts SET status = 'uncertain' WHERE id = ?")
+      .run(post.id)
+    const resolved = await call(
+      h.port,
+      `/api/posts/${post.id}/resolve-uncertain`,
+      {
+        method: 'POST',
+        token: TOKEN_ADMIN,
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ resolution: 'failed' })
+      }
+    )
+    expect(resolved.status).toBe(200)
+    expect(countPosts()).toBe(1)
+  })
 })
 
 describe('GET /api/me', () => {
@@ -701,5 +1133,36 @@ describe('unreadable cookie', () => {
 describe('review scope caption', () => {
   it('names the listed provisional check and withholds factual truth of numbers, names and claims', () => {
     expectReviewScopeMeaning(REVIEW_SCOPE)
+  })
+})
+
+describe('font assets', () => {
+  it('serves discovered woff2 files publicly with immutable caching and security headers', async () => {
+    const h = await start()
+    const response = await fetch(`http://127.0.0.1:${h.port}/assets/fonts/Inter-Regular.woff2`)
+    const bytes = Buffer.from(await response.arrayBuffer())
+
+    expect(response.status).toBe(200)
+    expect(bytes.equals(readFileSync(join(FONT_DIRECTORY, 'Inter-Regular.woff2')))).toBe(true)
+    expect(response.headers.get('content-type')).toBe('font/woff2')
+    expect(response.headers.get('cache-control')).toBe('public, max-age=31536000, immutable')
+    expect(response.headers.get('content-security-policy')).toContain("font-src 'self'")
+    expect(response.headers.get('content-security-policy')).toContain("default-src 'none'")
+  })
+
+  it('returns 404 for unknown, traversing, encoded-slash, non-woff2, and license files', async () => {
+    const h = await start()
+    for (const name of ['missing.woff2', '..%2fserver.ts', 'Inter-Regular.ttf', 'Inter-LICENSE.txt']) {
+      const response = await fetch(`http://127.0.0.1:${h.port}/assets/fonts/${name}`)
+      expect(response.status).toBe(404)
+    }
+  })
+
+  it('references the served Inter regular font from the composer page', async () => {
+    const h = await start()
+    const response = await call(h.port, '/', { token: TOKEN_A })
+    expect(response.status).toBe(200)
+    expect(response.text).toContain('@font-face')
+    expect(response.text).toContain('/assets/fonts/Inter-Regular.woff2')
   })
 })

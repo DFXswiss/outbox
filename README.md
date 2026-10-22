@@ -149,8 +149,8 @@ SIGTERM: ticker stops, waits for `runningId`. Boot: interrupted in-flight channe
 
 **Approver (ADMIN):**
 
-- `POST /api/posts/:id/retry` — `BEGIN IMMEDIATE` + `UPDATE … WHERE id=? AND status='failed'` → `pending`, audit, **no** synchronous X call. 0 rows → 409. Ticker takes due.
-- `POST /api/posts/:id/resolve-uncertain` — `{ resolution: "sent"|"failed", url? }`. Channel comes from the row. CAS `WHERE id=? AND status='uncertain'`; else 409.
+- `POST /api/posts/:id/retry` — `BEGIN IMMEDIATE` + `UPDATE … WHERE id=? AND status='failed'` → `pending`, audit, **no** synchronous X call. Unknown id → 404; a post that is not `failed` → 409. Ticker takes due.
+- `POST /api/posts/:id/resolve-uncertain` — `{ resolution: "sent"|"failed", url? }`. Channel comes from the row. CAS `WHERE id=? AND status='uncertain'`. Unknown id → 404; a post that is not `uncertain` → 409. A given `url` must be an X post permalink (`/<handle>/status/<id>`); query and fragment are dropped.
 
 Channel status: `pending | in-flight | sent | failed | uncertain`. `PublishResult.ok` is a JSON boolean, not the status.
 
@@ -166,7 +166,7 @@ Channel status: `pending | in-flight | sent | failed | uncertain`. `PublishResul
 
 ### Brand pack
 
-Phase 1: **one** brand, X only. Default recommendation **DFX** (`@DFX_Swiss`). Pack at `content/dfx/` **in the image**. Missing `rules.json` → submit 409 and health `ok: false`.
+Phase 1: **one** brand, X only: **21 gifts**. The brand slug is configuration (`BRAND`), the pack lives at `content/<brand>/` **in the image**. `rules.json` is not part of this repository; the build adds it from a private source. Missing `rules.json` → submit 409 and health `ok: false`.
 
 Blocking: forbidden claims, MiCAR-unsafe, provisional without qualifier. Hints: emoji, sentence length, X character count. No LLM. Pack updates = new image.
 
@@ -180,7 +180,7 @@ Blocking: forbidden claims, MiCAR-unsafe, provisional without qualifier. Hints: 
 { "ok": bool, "queueRunning": bool, "probes": { "x": "ok"|"bad", "jwt": "ok"|"bad" } }
 ```
 
-`ok` is true only when every probe is ok. `x=bad`: users/me mismatch. `jwt=bad` only when the JWT secret is unset (not a drift detector).
+`ok` is true only when every probe is ok. `x=bad`: no successful users/me probe yet (also while the service starts), the probe failed or the handle does not match, or a refresh needed a new login. `jwt=bad` only when the JWT secret is unset (not a drift detector).
 
 | Route | Role | Effect |
 |---|---|---|
@@ -192,8 +192,8 @@ Blocking: forbidden claims, MiCAR-unsafe, provisional without qualifier. Hints: 
 | `POST /api/bundles/:id/retract` | OUTBOX, authoredBy | Phase 1: one entry per bundle. 409 unless every entry is `submitted`; then CAS all to `retracted` |
 | `GET /review/:id` | same visibility as `GET /api/posts` | `:id` is the **bundle** id. GET, no side effect; no token in the query |
 | `POST /review/:id/decide` | ADMIN | `:id` is the bundle id. Body `{ decision: "approve"\|"reject" }` for that bundle's single entry (phase 1). CAS `submitted → approved\|rejected`. Queue insert **only** on `approve`, same transaction. Retract vs decide: one winner. Repeat 409. |
-| `POST /api/posts/:id/retry` | ADMIN | CAS `WHERE id=? AND status='failed'` → `pending`; else 409 |
-| `POST /api/posts/:id/resolve-uncertain` | ADMIN | `{ resolution: "sent"\|"failed", url? }`. CAS `WHERE id=? AND status='uncertain'`; else 409 |
+| `POST /api/posts/:id/retry` | ADMIN | CAS `WHERE id=? AND status='failed'` → `pending`; unknown id 404, else 409 |
+| `POST /api/posts/:id/resolve-uncertain` | ADMIN | `{ resolution: "sent"\|"failed", url? }`. CAS `WHERE id=? AND status='uncertain'`; unknown id 404, else 409 |
 
 No `/api/publish`, `/api/schedule`, `/now`.
 
@@ -203,9 +203,33 @@ Logs: denylist `Authorization`, Cookie, Bearer. No JWT in HTML.
 
 ---
 
+## Configuration
+
+Environment variables, read once at start. A missing or invalid required variable stops the process with its **name** (never its value).
+
+| Variable | Required | Default | Meaning |
+|---|---|---|---|
+| `DB_PATH` | yes | image: `/data/outbox.sqlite` | SQLite file on durable storage |
+| `BRAND` | yes | — | Brand slug; the pack is `<PACK_ROOT>/content/<BRAND>/rules.json` |
+| `PACK_ROOT` | no | `.` (image: `/app`) | Directory that **contains** `content/` |
+| `PORT` | no | `3000` | HTTP port |
+| `DFX_API_BASE_URL` | yes | — | DFX API for introspection |
+| `JWT_SECRET` | no | — | Same HS256 secret as the DFX API; unset → health `jwt: bad` |
+| `X_CLIENT_ID` | yes | — | X OAuth 2.0 client id |
+| `X_CLIENT_SECRET` | no | — | Confidential clients only; sent as Basic auth on refresh |
+| `X_REFRESH_TOKEN` | no | — | Seed for the stored refresh token, see below |
+| `X_HANDLE` | yes | — | Account the boot probe expects (leading `@` optional) |
+| `X_API_BASE` | no | `https://api.x.com` | X API base |
+
+**Refresh token.** X refresh tokens are treated as single-use: every refresh stores the new pair in `x_credentials` before the access token is used. `X_REFRESH_TOKEN` only seeds that row. The same value on a later start changes nothing; a **different** value replaces the stored token. After a lost rotation (`needs-login` alert), authorize again, set the new refresh token, and restart.
+
+**Container.** The rule list `content/<brand>/rules.json` is not in this repository; the build places it in the context before `docker build`. A running publish has a 90 s budget, so the deployment needs a stop grace of at least 100 s.
+
+---
+
 ## Data model
 
-SQLite WAL. Tables: drafts, bundles, entries, scheduled_posts, publish_results, audit, media.
+SQLite WAL. Tables: drafts, bundles, entries, scheduled_posts, publish_results, audit, media, x_credentials (the X OAuth token pair; the refresh token is stored at rest because it rotates).
 
 Phase 1: **one entry per bundle**. `GET`/`POST /review/:id` uses the bundle id.
 
@@ -237,6 +261,10 @@ Bundles and scheduled_posts store `authoredByUser` + `authoredByAccount` (JWT `u
 7. Retry does not retry `uncertain`.
 8. Boot probe `GET /2/users/me` matches the configured handle.
 
+## Handbook
+
+The operator handbook covers the composer, review states, and service responses. See [docs/handbook/README.md](docs/handbook/README.md) for coverage, regeneration, and content checks.
+
 ---
 
 ## Implementation plan
@@ -259,7 +287,6 @@ Feature work lands on **develop** via pull request. A push to `develop` opens a 
 
 ## Open questions
 
-1. Phase-1 brand: default DFX (`@DFX_Swiss`). Alternative: zkCoins.
-2. Approvers without full Admin? Default no. If yes: a userData-id allowlist in the DFX API, not email.
+1. Approvers without full Admin? Default no. If yes: a userData-id allowlist in the DFX API, not email.
 
-Not open: role name (`UserRole.OUTBOX`), Access emails as login.
+Not open: phase-1 brand (21 gifts), role name (`UserRole.OUTBOX`), Access emails as login.

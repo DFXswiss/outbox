@@ -1,4 +1,9 @@
 node_modules
+_handbook-deps
 dist
 coverage
 *.log
+*.sqlite*
+content/*/rules.json
+.env
+.env.*

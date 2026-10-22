@@ -4,6 +4,10 @@ import {
   type Server,
   type ServerResponse
 } from 'node:http'
+import { readFileSync, readdirSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { z } from 'zod'
 import { writeAudit } from './audit'
 import type { SqliteDatabase } from './db'
 import {
@@ -21,28 +25,33 @@ import {
 } from './html'
 import { hasRoleAccess, type Identity, type Introspect, type Role } from './identity'
 import { createLog } from './log'
+import { resolveUncertain, retryPost } from './queue'
 import { formatZurich, parseZurichDateTime } from './time'
 
 export type OutboxServerDeps = {
   db: SqliteDatabase
   packRoot: string
+  brand: string
   introspect: Introspect
   now?: () => number
   jwtSecret?: string
-  brand?: string
   log?: (line: string) => void
-  /** Wired in a later step to `GET /2/users/me`. Absent: the probe is `'bad'`. */
+  /** Wired to the publisher's X probe state. Absent: the probe is `'bad'`. */
   probeX?: () => 'ok' | 'bad'
+  publisher?: { running(): boolean }
 }
 
 const COOKIE_NAME = 'outbox'
 const COOKIE_MAX_AGE_SEC = 12 * 60 * 60
 const BODY_LIMIT = 1_000_000
-const DEFAULT_BRAND = 'dfx'
+const ResolveInputSchema = z.object({
+  resolution: z.enum(['sent', 'failed']),
+  url: z.string().optional()
+}).strict()
 
 const SECURITY_HEADERS: Record<string, string> = {
   'content-security-policy':
-    "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'",
+    "default-src 'none'; style-src 'unsafe-inline'; font-src 'self'; form-action 'self'; base-uri 'none'",
   'referrer-policy': 'no-referrer',
   'x-content-type-options': 'nosniff',
   'x-robots-tag': 'noindex, nofollow',
@@ -58,12 +67,18 @@ type EntryView = {
   checks: string | null
   authoredByUser: string
   authoredByAccount: string
+  postId: string | null
+  channel: string | null
+  channelStatus: string | null
+  postUrl: string | null
 }
 
 const ENTRY_VIEW_SQL = `SELECT e.id, e.bundleId, e.state, e.text, e.scheduledAt, e.checks,
-       b.authoredByUser, b.authoredByAccount
+       b.authoredByUser, b.authoredByAccount, p.id AS postId, p.channel,
+       p.status AS channelStatus, p.url AS postUrl
 FROM entries e
-JOIN bundles b ON b.id = e.bundleId`
+JOIN bundles b ON b.id = e.bundleId
+LEFT JOIN scheduled_posts p ON p.entryId = e.id`
 
 function headerString(value: string | string[] | undefined): string | null {
   if (typeof value === 'string' && value !== '') return value
@@ -88,7 +103,7 @@ function wantsJson(req: IncomingMessage, pathname: string): boolean {
 function send(
   res: ServerResponse,
   status: number,
-  body: string,
+  body: string | Buffer,
   headers: Record<string, string>
 ): void {
   res.writeHead(status, { ...SECURITY_HEADERS, ...headers })
@@ -235,8 +250,14 @@ function isVisible(identity: Identity, row: EntryView): boolean {
 
 export function createOutboxServer(deps: OutboxServerDeps): Server {
   const now = deps.now ?? (() => Date.now())
-  const brand = deps.brand ?? DEFAULT_BRAND
+  const brand = deps.brand
   const log = createLog(deps.log ?? ((line) => process.stdout.write(line + '\n')))
+  const fontDirectory = join(dirname(fileURLToPath(import.meta.url)), 'assets', 'fonts')
+  const fontNames = new Set(
+    readdirSync(fontDirectory, { withFileTypes: true })
+      .filter((entry) => entry.isFile() && entry.name.endsWith('.woff2'))
+      .map((entry) => entry.name)
+  )
 
   async function authenticate(
     req: IncomingMessage,
@@ -301,6 +322,15 @@ export function createOutboxServer(deps: OutboxServerDeps): Server {
     if (cookieHeaderValue) logParts.push(`Cookie: ${cookieHeaderValue}`)
     log(logParts.join(' '))
 
+    const fontRoute = /^\/assets\/fonts\/([^/]+)$/.exec(pathname)
+    if (method === 'GET' && fontRoute && fontNames.has(fontRoute[1]!)) {
+      send(res, 200, readFileSync(join(fontDirectory, fontRoute[1]!)), {
+        'content-type': 'font/woff2',
+        'cache-control': 'public, max-age=31536000, immutable'
+      })
+      return
+    }
+
     if (method === 'GET' && pathname === '/healthz') {
       const jwtOk = typeof deps.jwtSecret === 'string' && deps.jwtSecret !== ''
       const rulesOk = loadPackRules(deps.packRoot, brand) !== null
@@ -309,7 +339,7 @@ export function createOutboxServer(deps: OutboxServerDeps): Server {
       const ok = x === 'ok' && jwt === 'ok' && rulesOk
       sendJson(res, 200, {
         ok,
-        queueRunning: false,
+        queueRunning: deps.publisher?.running() ?? false,
         probes: { x, jwt }
       })
       return
@@ -355,14 +385,25 @@ export function createOutboxServer(deps: OutboxServerDeps): Server {
         return
       }
       const account = auth.identity.role === 'ADMIN' ? null : auth.identity.account
-      const posts = listEntries(deps.db, account).map((row) => ({
-        bundleId: row.bundleId,
-        entryId: row.id,
-        state: row.state,
-        text: row.text,
-        scheduledAt: row.scheduledAt,
-        authoredByAccount: row.authoredByAccount
-      }))
+      const posts = listEntries(deps.db, account).map((row) => {
+        const channel = row.postId === null
+          ? null
+          : {
+              postId: row.postId,
+              channel: row.channel!,
+              status: row.channelStatus!,
+              url: row.postUrl
+            }
+        return {
+          bundleId: row.bundleId,
+          entryId: row.id,
+          state: row.state,
+          text: row.text,
+          scheduledAt: row.scheduledAt,
+          authoredByAccount: row.authoredByAccount,
+          channel
+        }
+      })
       sendJson(res, 200, { posts })
       return
     }
@@ -387,7 +428,10 @@ export function createOutboxServer(deps: OutboxServerDeps): Server {
       const recorded = parseChecks(row.checks)
       const lockReason =
         row.state === 'submitted'
-          ? canDecide({ scheduledAt: row.scheduledAt, checks: row.checks }, now())
+          ? canDecide(
+              { scheduledAt: row.scheduledAt, checks: row.checks },
+              now()
+            )
           : null
       sendHtml(
         res,
@@ -399,7 +443,15 @@ export function createOutboxServer(deps: OutboxServerDeps): Server {
           state: row.state,
           recorded,
           lockReason,
-          approver: auth.identity.role === 'ADMIN'
+          approver: auth.identity.role === 'ADMIN',
+          channel: row.postId === null
+            ? null
+            : {
+                postId: row.postId,
+                channel: row.channel!,
+                status: row.channelStatus!,
+                url: row.postUrl
+              }
         })
       )
       return
@@ -414,13 +466,24 @@ export function createOutboxServer(deps: OutboxServerDeps): Server {
     const reviewPost = pathname === '/api/review'
     const retractMatch = /^\/api\/bundles\/([^/]+)\/retract$/.exec(pathname)
     const decideMatch = /^\/review\/([^/]+)\/decide$/.exec(pathname)
-    if (!submitPost && !reviewPost && !retractMatch && !decideMatch) {
+    const retryMatch = /^\/api\/posts\/([^/]+)\/retry$/.exec(pathname)
+    const resolveMatch = /^\/api\/posts\/([^/]+)\/resolve-uncertain$/.exec(pathname)
+    if (
+      !submitPost &&
+      !reviewPost &&
+      !retractMatch &&
+      !decideMatch &&
+      !retryMatch &&
+      !resolveMatch
+    ) {
       await readBody(req)
       fail(res, req, pathname, 404, 'not-found', 'Not found.')
       return
     }
 
-    const neededRole: Role = decideMatch ? 'ADMIN' : 'OUTBOX'
+    const neededRole: Role = decideMatch || retryMatch || resolveMatch
+      ? 'ADMIN'
+      : 'OUTBOX'
     const auth = await authenticate(req, neededRole)
     if (!auth.ok) {
       await readBody(req)
@@ -653,6 +716,127 @@ export function createOutboxServer(deps: OutboxServerDeps): Server {
         res,
         200,
         renderPlainPage('Decided', result.state === 'approved' ? 'Approved and queued.' : 'Rejected.')
+      )
+      return
+    }
+
+    if (retryMatch || resolveMatch) {
+      const postId = (retryMatch ?? resolveMatch)![1]!
+      const known = deps.db.prepare('SELECT id FROM scheduled_posts WHERE id = ?').get(postId)
+      if (!known) {
+        fail(res, req, pathname, 404, 'not-found', 'Not found.')
+        return
+      }
+      let result: ReturnType<typeof retryPost> | ReturnType<typeof resolveUncertain>
+      if (retryMatch) {
+        await readBody(req)
+        result = retryPost(deps.db, {
+          postId,
+          actor: {
+            user: auth.identity.user,
+            account: auth.identity.account
+          },
+          now: now()
+        })
+      } else {
+        const parsed = await parseFields(req)
+        if (!parsed.ok) {
+          fail(res, req, pathname, parsed.status, 'invalid-request', parsed.message)
+          return
+        }
+        const body = ResolveInputSchema.safeParse(parsed.fields)
+        if (!body.success) {
+          fail(
+            res,
+            req,
+            pathname,
+            400,
+            'invalid-request',
+            'Provide resolution and an optional url.'
+          )
+          return
+        }
+        const { resolution } = body.data
+        const targetUrl = body.data.url?.trim() || undefined
+        let normalizedUrl: string | undefined
+        if (resolution === 'failed' && targetUrl !== undefined) {
+          fail(
+            res,
+            req,
+            pathname,
+            400,
+            'invalid-request',
+            'url is allowed only when resolution is sent.'
+          )
+          return
+        }
+        if (targetUrl !== undefined) {
+          let parsedUrl: URL
+          try {
+            parsedUrl = new URL(targetUrl)
+          } catch {
+            fail(
+              res,
+              req,
+              pathname,
+              400,
+              'invalid-request',
+              'url must be an X post URL.'
+            )
+            return
+          }
+          if (
+            parsedUrl.protocol !== 'https:' ||
+            parsedUrl.username !== '' ||
+            parsedUrl.password !== '' ||
+            parsedUrl.port !== '' ||
+            ![
+              'x.com',
+              'www.x.com',
+              'mobile.x.com',
+              'twitter.com',
+              'www.twitter.com',
+              'mobile.twitter.com'
+            ].includes(parsedUrl.hostname.toLowerCase()) ||
+            !/^\/(?:[A-Za-z0-9_]{1,15}\/status\/\d+|i\/web\/status\/\d+)\/?$/.test(
+              parsedUrl.pathname
+            )
+          ) {
+            fail(
+              res,
+              req,
+              pathname,
+              400,
+              'invalid-request',
+              'url must be an X post URL.'
+            )
+            return
+          }
+          normalizedUrl = `${parsedUrl.origin}${parsedUrl.pathname}`
+        }
+        result = resolveUncertain(deps.db, {
+          postId,
+          resolution,
+          ...(normalizedUrl !== undefined ? { url: normalizedUrl } : {}),
+          actor: {
+            user: auth.identity.user,
+            account: auth.identity.account
+          },
+          now: now()
+        })
+      }
+      if (!result.ok) {
+        fail(res, req, pathname, 409, 'conflict', 'Post status conflict.')
+        return
+      }
+      if (wantsJson(req, pathname)) {
+        sendJson(res, 200, { ok: true, status: result.status })
+        return
+      }
+      sendHtml(
+        res,
+        200,
+        renderPlainPage('Post updated', `Post status: ${result.status}.`)
       )
       return
     }

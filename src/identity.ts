@@ -73,6 +73,7 @@ export type HttpIntrospectOptions = {
   baseUrl: string
   jwtSecret?: string
   fetch?: typeof fetch
+  timeoutMs?: number
 }
 
 /**
@@ -107,7 +108,8 @@ export function createHttpIntrospect(options: HttpIntrospectOptions): Introspect
     try {
       response = await fetchImpl(`${root}${path}`, {
         headers: { Authorization: `Bearer ${token}` },
-        redirect: 'manual'
+        redirect: 'manual',
+        signal: AbortSignal.timeout(options.timeoutMs ?? 5_000)
       })
     } catch {
       return { ok: false, status: 502 }
