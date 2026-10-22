@@ -1,10 +1,36 @@
 {
   "inputs": [
+    "review/aiMarkers.ts",
+    "review/engine.ts",
+    "review/README.md",
+    "review/schema.ts",
+    "review/xAlgorithm.ts",
     "scripts/handbook/capture.mjs",
+    "src/alerts.ts",
+    "src/app.ts",
+    "src/assets/fonts/Inter-Bold.woff2",
+    "src/assets/fonts/Inter-LICENSE.txt",
+    "src/assets/fonts/Inter-Regular.woff2",
+    "src/assets/fonts/Inter-SemiBold.woff2",
+    "src/audit.ts",
+    "src/config.ts",
+    "src/content-hash.ts",
+    "src/db.ts",
+    "src/entries.ts",
+    "src/findings.ts",
+    "src/healthcheck.mjs",
     "src/html.ts",
-    "src/server.ts"
+    "src/identity.ts",
+    "src/log.ts",
+    "src/main.ts",
+    "src/publisher.ts",
+    "src/queue.ts",
+    "src/server.ts",
+    "src/status.ts",
+    "src/time.ts",
+    "src/x-client.ts"
   ],
-  "inputsSha256": "068a29fca681906e20e34ccfd893ece16f8846a146618bd2afcb08610bd38c8b",
+  "inputsSha256": "46d5ee2990bacc8cb450bbae712b446991482c4b4a454d8ff8a12f6d311675b3",
   "viewport": {
     "width": 760,
     "height": "visible body content + 24px"

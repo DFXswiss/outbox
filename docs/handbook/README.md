@@ -1,6 +1,6 @@
 # Handbook maintenance
 
-This handbook is built from the Markdown beside each captured screen. The build writes `index.html`, `handbook.css`, the screenshots and `manifest.json` into an output directory outside the repository. `capture.json` lists the sorted capture inputs in `inputs` and their SHA-256 digest in `inputsSha256`: `src/html.ts`, `src/server.ts` and `scripts/handbook/capture.mjs`. Other source changes, such as `src/entries.ts`, are not covered by this check.
+This handbook is built from the Markdown beside each captured screen. The build writes `index.html`, `handbook.css`, the screenshots and `manifest.json` into an output directory outside the repository. `capture.json` lists the sorted capture inputs in `inputs` and their SHA-256 digest in `inputsSha256`: every file under `src/` and `review/` except `*.test.ts`, plus `scripts/handbook/capture.mjs`. Changes to any of these files make the screenshots stale and require a new capture.
 
 ## Regenerate
 
@@ -16,7 +16,7 @@ npm run handbook:gate -- "$OUT"
 
 The capture starts the real service with temporary storage and local API stubs and takes about nine minutes, because sent, failed, uncertain and in-flight posts have to become due. Review every expected state, then set `MIN_SCREENSHOTS` and `MIN_GROUPS` to the captured counts and update the coverage counts here. These are lower bounds; a larger capture set is allowed. The build discovers groups and image/text pairs from disk; it has no image mapping table.
 
-The build checks PNG signatures and sizes, pair completeness, capture freshness, output paths, and local links. Changes to `src/html.ts`, `src/server.ts` or `scripts/handbook/capture.mjs` require a new capture. Changes elsewhere, including `src/entries.ts`, are not detected by the freshness check.
+The build checks PNG signatures and sizes, pair completeness, capture freshness, output paths, and local links. It only replaces an empty output directory or one with a valid handbook `manifest.json`; it refuses non-empty unrelated directories and symlink targets.
 
 The content gate checks every built PNG for QR payloads and OCR text. QR payloads require an explicit path and payload-pattern allowlist entry. OCR accepts tokens found in the source text and handbook, with a one-character tolerance for OCR noise. It also rejects likely secrets, email addresses, and unexpected URLs. Both `zbarimg` and `tesseract` are required; missing tools fail the gate.
 

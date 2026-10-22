@@ -1,9 +1,9 @@
 import { createHash } from 'node:crypto'
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { buildHandbook, discoverHandbook, findScreenshotPairErrors, readPngDimensions, registerOutputDestination, resolveOutputDirectory, verifyReferences, MIN_SCREENSHOTS, CAPTURE_INPUTS } from './build'
+import { buildHandbook, discoverCaptureInputs, discoverHandbook, findScreenshotPairErrors, readPngDimensions, registerOutputDestination, resolveOutputDirectory, verifyReferences, MIN_SCREENSHOTS } from './build'
 
 const roots: string[] = []
 
@@ -22,15 +22,39 @@ function png(size = 1001): Buffer {
   return data
 }
 
+function writePreviousBuild(dir: string): void {
+  mkdirSync(dir)
+  writeFileSync(join(dir, 'manifest.json'), JSON.stringify({ artifacts: [{ outputPath: 'index.html' }] }))
+  writeFileSync(join(dir, 'marker.txt'), 'keep this output')
+}
+
 function writeCaptureMetadata(repo: string): void {
+  const inputs = discoverCaptureInputs(repo)
   const hash = createHash('sha256')
-  for (const input of CAPTURE_INPUTS) {
+  for (const input of inputs) {
     const path = join(repo, input)
     mkdirSync(join(path, '..'), { recursive: true })
     if (!existsSync(path)) writeFileSync(path, `fixture source for ${input}\n`)
     hash.update(input).update('\0').update(readFileSync(path)).update('\0')
   }
-  writeFileSync(join(repo, 'docs/handbook/screenshots/capture.json'), JSON.stringify({ inputs: CAPTURE_INPUTS, inputsSha256: hash.digest('hex') }))
+  writeFileSync(join(repo, 'docs/handbook/screenshots/capture.json'), JSON.stringify({ inputs, inputsSha256: hash.digest('hex') }))
+}
+
+function captureRepo(root: string): string {
+  const repo = join(root, 'repo')
+  mkdirSync(join(repo, 'src'), { recursive: true })
+  mkdirSync(join(repo, 'review'), { recursive: true })
+  mkdirSync(join(repo, 'docs/handbook/screenshots/chapter'), { recursive: true })
+  mkdirSync(join(repo, 'docs/handbook'), { recursive: true })
+  writeFileSync(join(repo, 'src/html.ts'), 'export const current = true\n')
+  writeFileSync(join(repo, 'src/server.ts'), 'export const server = true\n')
+  writeFileSync(join(repo, 'src/findings.ts'), 'export const findings = true\n')
+  writeFileSync(join(repo, 'review/example.md'), '# Review\n')
+  writeFileSync(join(repo, 'docs/handbook/intro.md'), '# Introduction\n')
+  writeFileSync(join(repo, 'docs/handbook/screenshots/chapter/_group.md'), '# Chapter\n')
+  writeFileSync(join(repo, 'docs/handbook/screenshots/chapter/01-page.png'), png())
+  writeFileSync(join(repo, 'docs/handbook/screenshots/chapter/01-page.md'), '# Page\n')
+  return repo
 }
 
 function writeDiscoveryFixture(root: string, screenshotCount: number): string {
@@ -54,6 +78,78 @@ afterEach(() => {
 })
 
 describe('handbook build discovery', () => {
+  it('discovers capture inputs from source and review trees while excluding tests', () => {
+    const root = tempRoot()
+    const repo = captureRepo(root)
+    writeFileSync(join(repo, 'src/server.test.ts'), 'test')
+    const inputs = discoverCaptureInputs(repo)
+    expect(inputs).toEqual(expect.arrayContaining([
+      'src/html.ts', 'src/server.ts', 'src/findings.ts', 'review/example.md', 'scripts/handbook/capture.mjs'
+    ]))
+    expect(inputs.some((input) => input.endsWith('.test.ts'))).toBe(false)
+  })
+
+  it.each(['src/html.ts', 'src/findings.ts', 'scripts/handbook/capture.mjs'])(
+    'marks capture metadata stale after %s changes', (changedPath) => {
+      const root = tempRoot()
+      const repo = captureRepo(root)
+      writeCaptureMetadata(repo)
+      writeFileSync(join(repo, changedPath), 'changed after capture\n')
+      expect(() => buildHandbook(repo, join(root, 'output'), { minScreenshots: 0, minGroups: 0 })).toThrow('screenshots are stale')
+    }
+  )
+
+  it('refuses a non-empty output that is not a previous handbook build', () => {
+    const root = tempRoot()
+    const repo = captureRepo(root)
+    const output = join(root, 'documents')
+    mkdirSync(output)
+    writeFileSync(join(output, 'important.txt'), 'preserve me')
+    expect(() => buildHandbook(repo, output, { minScreenshots: 0, minGroups: 0 })).toThrow('not a handbook build')
+    expect(readFileSync(join(output, 'important.txt'), 'utf8')).toBe('preserve me')
+  })
+
+  it.each([
+    ['an unrelated artifact', { artifacts: [{ outputPath: 'other.html' }] }],
+    ['an empty artifact list', { artifacts: [] }],
+  ])('refuses a non-empty output with a manifest containing %s', (_description, manifest) => {
+    const root = tempRoot()
+    const repo = captureRepo(root)
+    const output = join(root, 'documents')
+    mkdirSync(output)
+    writeFileSync(join(output, 'manifest.json'), JSON.stringify(manifest))
+    writeFileSync(join(output, 'important.txt'), 'preserve me')
+
+    expect(() => buildHandbook(repo, output, { minScreenshots: 0, minGroups: 0 }))
+      .toThrow('Refusing to replace non-empty directory that is not a handbook build')
+    expect(readFileSync(join(output, 'manifest.json'), 'utf8')).toBe(JSON.stringify(manifest))
+    expect(readFileSync(join(output, 'important.txt'), 'utf8')).toBe('preserve me')
+  })
+
+  it('refuses a symlink output directory', () => {
+    const root = tempRoot()
+    const repo = captureRepo(root)
+    const target = join(root, 'target')
+    const link = join(root, 'linked-output')
+    mkdirSync(target)
+    symlinkSync(target, link)
+    expect(() => buildHandbook(repo, link, { minScreenshots: 0, minGroups: 0 })).toThrow('must not be a symlink')
+  })
+
+  it.each(['empty', 'previous handbook build'])(
+    'replaces an %s output directory', (kind) => {
+      const root = tempRoot()
+      const repo = captureRepo(root)
+      writeCaptureMetadata(repo)
+      const output = join(root, 'output')
+      mkdirSync(output)
+      if (kind === 'previous handbook build') writeFileSync(join(output, 'manifest.json'), JSON.stringify({ artifacts: [{ outputPath: 'index.html' }] }))
+      const result = buildHandbook(repo, output, { minScreenshots: 0, minGroups: 0 })
+      expect(result.outputDir).toBe(output)
+      expect(existsSync(join(output, 'index.html'))).toBe(true)
+    }
+  )
+
   it('reports both missing image and missing text pairs', () => {
     const root = tempRoot()
     const group = join(root, 'screenshots', 'chapter')
@@ -215,11 +311,11 @@ describe('handbook build discovery', () => {
     mkdirSync(join(repo, 'docs/handbook'), { recursive: true })
     writeFileSync(join(repo, 'src/html.ts'), htmlSource)
     writeFileSync(join(repo, 'docs/handbook/intro.md'), '# Introduction\n')
-    writeCaptureMetadata(repo)
     for (const font of ['Inter-Regular.woff2', 'Inter-SemiBold.woff2', 'Inter-Bold.woff2']) {
       writeFileSync(join(repo, 'src/assets/fonts', font), `font:${font}`)
     }
     writeFileSync(join(repo, 'src/assets/fonts/Inter-LICENSE.txt'), 'OFL license')
+    writeCaptureMetadata(repo)
     writeFileSync(join(screenshots, '_group.md'), '# Chapter\n\nChapter introduction.')
 
     const png = Buffer.alloc(1001)
@@ -273,8 +369,7 @@ describe('handbook build discovery', () => {
     writeFileSync(join(screenshots, '01-page.png'), png())
     writeFileSync(join(screenshots, '01-page.md'), '# Page\n')
     const output = join(root, 'output')
-    mkdirSync(output)
-    writeFileSync(join(output, 'old.txt'), 'old')
+    writePreviousBuild(output)
     let removals = 0
     const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true)
     try {
@@ -314,8 +409,7 @@ describe('handbook build discovery', () => {
     writeFileSync(join(screenshots, '01-page.png'), png())
     writeFileSync(join(screenshots, '01-page.md'), '# Page\n')
     const output = join(root, 'output')
-    mkdirSync(output)
-    writeFileSync(join(output, 'marker.txt'), 'keep this output')
+    writePreviousBuild(output)
     const resolvedOutput = realpathSync(output)
     expect(() => buildHandbook(repo, output, {
       minScreenshots: 0,
@@ -410,8 +504,7 @@ describe('handbook build discovery', () => {
     writeFileSync(join(screenshots, '01-invalid.png'), png().fill(0, 12, 16))
     writeFileSync(join(screenshots, '01-invalid.md'), '# Invalid screenshot\n')
     const output = join(root, 'output')
-    mkdirSync(output)
-    writeFileSync(join(output, 'marker.txt'), 'keep this output')
+    writePreviousBuild(output)
 
     expect(() => buildHandbook(repo, output, { minScreenshots: 0, minGroups: 0 }))
       .toThrow('PNG has no IHDR header')

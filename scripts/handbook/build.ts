@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import * as fs from 'node:fs'
-import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, statSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, dirname, extname, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -18,11 +18,25 @@ function sha256(data: Buffer | string): string {
   return createHash('sha256').update(data).digest('hex')
 }
 
-export const CAPTURE_INPUTS = ['scripts/handbook/capture.mjs', 'src/html.ts', 'src/server.ts'].sort((a, b) => a.localeCompare(b, 'en'))
+function walkCaptureInputs(root: string, directory: string): string[] {
+  if (!existsSync(join(root, directory))) return []
+  return readdirSync(join(root, directory), { withFileTypes: true }).flatMap((entry) => {
+    const path = join(directory, entry.name).split(sep).join('/')
+    if (entry.isDirectory()) return walkCaptureInputs(root, path)
+    return entry.isFile() && !entry.name.endsWith('.test.ts') ? [path] : []
+  })
+}
 
-function captureInputsSha256(repoRoot: string): string {
+export function discoverCaptureInputs(repoRoot: string): string[] {
+  return [...walkCaptureInputs(repoRoot, 'src'), ...walkCaptureInputs(repoRoot, 'review'), 'scripts/handbook/capture.mjs'].sort((a, b) => a.localeCompare(b, 'en'))
+}
+
+const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..')
+export const CAPTURE_INPUTS = discoverCaptureInputs(repositoryRoot)
+
+function captureInputsSha256(repoRoot: string, inputs: string[]): string {
   const hash = createHash('sha256')
-  for (const input of CAPTURE_INPUTS) {
+  for (const input of inputs) {
     hash.update(input).update('\0').update(readFileSync(join(repoRoot, input))).update('\0')
   }
   return hash.digest('hex')
@@ -195,10 +209,34 @@ export function buildHandbook(
   options: { minScreenshots?: number; minGroups?: number; fs?: ExchangeFileSystem } = {}
 ): { outputDir: string; manifest: { artifacts: Artifact[] } } {
   const exchangeFs = options.fs ?? fs
+  let requestedStat: ReturnType<typeof lstatSync> | undefined
+  try { requestedStat = lstatSync(resolve(requestedOutput)) } catch {}
+  if (requestedStat?.isSymbolicLink()) throw new Error(`Output directory must not be a symlink: ${resolve(requestedOutput)}`)
   const outputDir = resolveOutputDirectory(requestedOutput, repoRoot)
+  let outputStat: ReturnType<typeof lstatSync> | undefined
+  try { outputStat = lstatSync(outputDir) } catch {}
+  if (outputStat) {
+    if (outputStat.isSymbolicLink()) throw new Error(`Output directory must not be a symlink: ${outputDir}`)
+    if (!statSync(outputDir).isDirectory()) throw new Error(`Output path is not a directory: ${outputDir}`)
+    const contents = readdirSync(outputDir)
+    if (contents.length > 0) {
+      let isPreviousBuild = false
+      try {
+        const manifest = JSON.parse(readFileSync(join(outputDir, 'manifest.json'), 'utf8')) as { artifacts?: Array<{ outputPath?: unknown }> }
+        isPreviousBuild = Array.isArray(manifest.artifacts) && manifest.artifacts.some((artifact) => artifact?.outputPath === 'index.html')
+      } catch {}
+      if (!isPreviousBuild) throw new Error(`Refusing to replace non-empty directory that is not a handbook build: ${outputDir}`)
+    }
+  }
   const capturePath = join(repoRoot, 'docs/handbook/screenshots/capture.json')
-  const capture = JSON.parse(readFileSync(capturePath, 'utf8')) as { inputs?: string[]; inputsSha256?: string }
-  if (JSON.stringify(capture.inputs) !== JSON.stringify(CAPTURE_INPUTS) || capture.inputsSha256 !== captureInputsSha256(repoRoot)) {
+  let capture: { inputs?: string[]; inputsSha256?: string }
+  try {
+    capture = JSON.parse(readFileSync(capturePath, 'utf8')) as { inputs?: string[]; inputsSha256?: string }
+  } catch {
+    throw new Error('screenshots are stale, run the capture')
+  }
+  const captureInputs = discoverCaptureInputs(repoRoot)
+  if (JSON.stringify(capture.inputs) !== JSON.stringify(captureInputs) || capture.inputsSha256 !== captureInputsSha256(repoRoot, captureInputs)) {
     throw new Error('screenshots are stale, run the capture')
   }
   const discovered = discoverHandbook(join(repoRoot, 'docs/handbook/screenshots'), options)
