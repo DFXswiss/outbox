@@ -1,14 +1,14 @@
 import { createHash } from 'node:crypto'
-import { mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, describe, expect, it } from 'vitest'
-import { buildHandbook, discoverHandbook, findScreenshotPairErrors, readPngDimensions, registerOutputDestination, resolveOutputDirectory, verifyReferences, MIN_SCREENSHOTS } from './build'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { buildHandbook, discoverHandbook, findScreenshotPairErrors, readPngDimensions, registerOutputDestination, resolveOutputDirectory, verifyReferences, MIN_SCREENSHOTS, CAPTURE_INPUTS } from './build'
 
 const roots: string[] = []
 
 function tempRoot(): string {
-  const path = mkdtempSync(join(tmpdir(), 'outbox-handbook-test-'))
+  const path = realpathSync(mkdtempSync(join(tmpdir(), 'outbox-handbook-test-')))
   roots.push(path)
   return path
 }
@@ -20,6 +20,17 @@ function png(size = 1001): Buffer {
   data.writeUInt32BE(760, 16)
   data.writeUInt32BE(900, 20)
   return data
+}
+
+function writeCaptureMetadata(repo: string): void {
+  const hash = createHash('sha256')
+  for (const input of CAPTURE_INPUTS) {
+    const path = join(repo, input)
+    mkdirSync(join(path, '..'), { recursive: true })
+    if (!existsSync(path)) writeFileSync(path, `fixture source for ${input}\n`)
+    hash.update(input).update('\0').update(readFileSync(path)).update('\0')
+  }
+  writeFileSync(join(repo, 'docs/handbook/screenshots/capture.json'), JSON.stringify({ inputs: CAPTURE_INPUTS, inputsSha256: hash.digest('hex') }))
 }
 
 function writeDiscoveryFixture(root: string, screenshotCount: number): string {
@@ -144,7 +155,7 @@ describe('handbook build discovery', () => {
     expect(() => resolveOutputDirectory(homedir(), repo)).toThrow(/outside the repository/)
   })
 
-  it('rejects stale screenshot captures in a temporary repository', () => {
+  it('rejects stale screenshots when src/server.ts changes', () => {
     const root = tempRoot()
     const repo = join(root, 'repo')
     const group = join(repo, 'docs/handbook/screenshots/chapter')
@@ -153,7 +164,8 @@ describe('handbook build discovery', () => {
     mkdirSync(join(repo, 'docs/handbook'), { recursive: true })
     writeFileSync(join(repo, 'src/html.ts'), 'export const current = true\n')
     writeFileSync(join(repo, 'docs/handbook/intro.md'), '# Introduction\n')
-    writeFileSync(join(repo, 'docs/handbook/screenshots/capture.json'), JSON.stringify({ htmlSha256: 'stale-hash' }))
+    writeCaptureMetadata(repo)
+    writeFileSync(join(repo, 'src/server.ts'), 'changed after capture\n')
     writeFileSync(join(group, '_group.md'), '# Chapter\n')
     writeFileSync(join(group, '01-page.png'), png())
     writeFileSync(join(group, '01-page.md'), '# Page\n')
@@ -203,9 +215,7 @@ describe('handbook build discovery', () => {
     mkdirSync(join(repo, 'docs/handbook'), { recursive: true })
     writeFileSync(join(repo, 'src/html.ts'), htmlSource)
     writeFileSync(join(repo, 'docs/handbook/intro.md'), '# Introduction\n')
-    writeFileSync(join(repo, 'docs/handbook/screenshots/capture.json'), JSON.stringify({
-      htmlSha256: createHash('sha256').update(htmlSource).digest('hex')
-    }))
+    writeCaptureMetadata(repo)
     for (const font of ['Inter-Regular.woff2', 'Inter-SemiBold.woff2', 'Inter-Bold.woff2']) {
       writeFileSync(join(repo, 'src/assets/fonts', font), `font:${font}`)
     }
@@ -249,6 +259,121 @@ describe('handbook build discovery', () => {
     }
   })
 
+  it('keeps a successful replacement when removing the backup fails', () => {
+    const root = tempRoot()
+    const repo = join(root, 'repo')
+    const screenshots = join(repo, 'docs/handbook/screenshots/chapter')
+    mkdirSync(screenshots, { recursive: true })
+    mkdirSync(join(repo, 'src'), { recursive: true })
+    mkdirSync(join(repo, 'docs/handbook'), { recursive: true })
+    writeFileSync(join(repo, 'src/html.ts'), 'export const current = true\n')
+    writeFileSync(join(repo, 'docs/handbook/intro.md'), '# Introduction\n')
+    writeCaptureMetadata(repo)
+    writeFileSync(join(screenshots, '_group.md'), '# Chapter\n')
+    writeFileSync(join(screenshots, '01-page.png'), png())
+    writeFileSync(join(screenshots, '01-page.md'), '# Page\n')
+    const output = join(root, 'output')
+    mkdirSync(output)
+    writeFileSync(join(output, 'old.txt'), 'old')
+    let removals = 0
+    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true)
+    try {
+      const result = buildHandbook(repo, output, {
+        minScreenshots: 0,
+        minGroups: 0,
+        fs: {
+          existsSync,
+          mkdtempSync,
+          renameSync,
+          rmSync: (path, options) => {
+            if (String(path).includes('.output-backup-') && ++removals === 2) throw new Error('backup cleanup failed')
+            return rmSync(path, options)
+          }
+        }
+      })
+      expect(result.outputDir).toBe(output)
+      expect(readFileSync(join(output, 'index.html'), 'utf8')).toContain('<h3>Page</h3>')
+      expect(stderr.mock.calls.map((call) => String(call[0])).join('')).toContain('backup cleanup failed')
+      expect(stderr.mock.calls.map((call) => String(call[0])).join('')).toContain('.output-backup-')
+    } finally {
+      stderr.mockRestore()
+    }
+  })
+
+  it('preserves the old output when renaming the temporary output fails', () => {
+    const root = tempRoot()
+    const repo = join(root, 'repo')
+    const screenshots = join(repo, 'docs/handbook/screenshots/chapter')
+    mkdirSync(screenshots, { recursive: true })
+    mkdirSync(join(repo, 'src'), { recursive: true })
+    mkdirSync(join(repo, 'docs/handbook'), { recursive: true })
+    writeFileSync(join(repo, 'src/html.ts'), 'export const current = true\n')
+    writeFileSync(join(repo, 'docs/handbook/intro.md'), '# Introduction\n')
+    writeCaptureMetadata(repo)
+    writeFileSync(join(screenshots, '_group.md'), '# Chapter\n')
+    writeFileSync(join(screenshots, '01-page.png'), png())
+    writeFileSync(join(screenshots, '01-page.md'), '# Page\n')
+    const output = join(root, 'output')
+    mkdirSync(output)
+    writeFileSync(join(output, 'marker.txt'), 'keep this output')
+    const resolvedOutput = realpathSync(output)
+    expect(() => buildHandbook(repo, output, {
+      minScreenshots: 0,
+      minGroups: 0,
+      fs: {
+        existsSync,
+        mkdtempSync,
+        rmSync,
+        renameSync: (source, destination) => {
+          if (String(source).includes('.output-tmp-') && destination === resolvedOutput) throw new Error('replacement rename failed')
+          return renameSync(source, destination)
+        }
+      }
+    })).toThrow('replacement rename failed')
+    expect(readFileSync(join(output, 'marker.txt'), 'utf8')).toBe('keep this output')
+  })
+
+  it('reports both output and backup paths when restoring the old output fails', () => {
+    const root = tempRoot()
+    const repo = join(root, 'repo')
+    const screenshots = join(repo, 'docs/handbook/screenshots/chapter')
+    mkdirSync(screenshots, { recursive: true })
+    mkdirSync(join(repo, 'src'), { recursive: true })
+    mkdirSync(join(repo, 'docs/handbook'), { recursive: true })
+    writeFileSync(join(repo, 'src/html.ts'), 'export const current = true\n')
+    writeFileSync(join(repo, 'docs/handbook/intro.md'), '# Introduction\n')
+    writeCaptureMetadata(repo)
+    writeFileSync(join(screenshots, '_group.md'), '# Chapter\n')
+    writeFileSync(join(screenshots, '01-page.png'), png())
+    writeFileSync(join(screenshots, '01-page.md'), '# Page\n')
+    const output = join(root, 'output')
+    mkdirSync(output)
+    const originalRename = renameSync
+    let backupPath = ''
+    let errorMessage = ''
+    try {
+      buildHandbook(repo, output, {
+        minScreenshots: 0,
+        minGroups: 0,
+        fs: {
+          existsSync,
+          mkdtempSync,
+          rmSync,
+          renameSync: (source, destination) => {
+            if (String(destination).includes('.output-backup-')) backupPath = String(destination)
+            if (String(source).includes('.output-tmp-') && String(destination) === realpathSync(output)) throw new Error('replacement rename failed')
+            if (String(source) === backupPath && String(destination) === output) throw new Error('restore rename failed')
+            return originalRename(source, destination)
+          }
+        }
+      })
+    } catch (error) {
+      errorMessage = error instanceof Error ? error.message : String(error)
+    }
+    expect(errorMessage).toContain(`output path: ${output}; backup path: ${backupPath}`)
+    expect(backupPath).toContain('.output-backup-')
+  })
+
   it('uses production screenshot floors when buildHandbook options are omitted', () => {
     const root = tempRoot()
     const repo = join(root, 'repo')
@@ -259,9 +384,7 @@ describe('handbook build discovery', () => {
     mkdirSync(join(repo, 'docs/handbook'), { recursive: true })
     writeFileSync(join(repo, 'src/html.ts'), htmlSource)
     writeFileSync(join(repo, 'docs/handbook/intro.md'), '# Introduction\n')
-    writeFileSync(join(repo, 'docs/handbook/screenshots/capture.json'), JSON.stringify({
-      htmlSha256: createHash('sha256').update(htmlSource).digest('hex')
-    }))
+    writeCaptureMetadata(repo)
     writeFileSync(join(screenshots, '_group.md'), '# Chapter\n\nChapter introduction.')
     for (const name of ['01-first', '02-second']) {
       writeFileSync(join(screenshots, `${name}.png`), png())
@@ -282,9 +405,7 @@ describe('handbook build discovery', () => {
     mkdirSync(join(repo, 'docs/handbook'), { recursive: true })
     writeFileSync(join(repo, 'src/html.ts'), htmlSource)
     writeFileSync(join(repo, 'docs/handbook/intro.md'), '# Introduction\n')
-    writeFileSync(join(repo, 'docs/handbook/screenshots/capture.json'), JSON.stringify({
-      htmlSha256: createHash('sha256').update(htmlSource).digest('hex')
-    }))
+    writeCaptureMetadata(repo)
     writeFileSync(join(screenshots, '_group.md'), '# Chapter\n')
     writeFileSync(join(screenshots, '01-invalid.png'), png().fill(0, 12, 16))
     writeFileSync(join(screenshots, '01-invalid.md'), '# Invalid screenshot\n')

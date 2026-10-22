@@ -21,17 +21,24 @@ function escapeHtml(value: string): string {
     .replace(/'/g, '&#39;')
 }
 
-function decodeEntities(value: string): string {
+function decodeEntities(value: string, file: string, line: number): string {
+  const decode = (digits: string, radix: number) => {
+    const codePoint = Number.parseInt(digits, radix)
+    if (!Number.isInteger(codePoint) || codePoint < 0 || codePoint > 0x10ffff) {
+      throw new HandbookMarkdownError(file, line, 'invalid numeric character reference')
+    }
+    return String.fromCodePoint(codePoint)
+  }
   return value
     .replace(/&colon;|&#0*58;|&#x0*3a;/gi, ':')
     .replace(/&tab;|&#0*9;|&#x0*9;/gi, '\t')
     .replace(/&newline;|&#0*10;|&#x0*a;/gi, '\n')
-    .replace(/&#(\d+);/g, (_, digits: string) => String.fromCodePoint(Number(digits)))
-    .replace(/&#x([a-f\d]+);/gi, (_, digits: string) => String.fromCodePoint(Number.parseInt(digits, 16)))
+    .replace(/&#(\d+);/g, (_, digits: string) => decode(digits, 10))
+    .replace(/&#x([a-f\d]+);/gi, (_, digits: string) => decode(digits, 16))
 }
 
 function safeHref(target: string, file: string, line: number): string {
-  const decoded = decodeEntities(target)
+  const decoded = decodeEntities(target, file, line)
   if (decoded !== decoded.trim() || /[\u0000-\u0020\\]/.test(decoded)) {
     throw new HandbookMarkdownError(file, line, `unsafe link target: ${target}`)
   }
@@ -55,21 +62,21 @@ function safeHref(target: string, file: string, line: number): string {
 
 function inline(source: string, file: string, line: number): string {
   const pieces: string[] = []
+  const formatText = (value: string) => escapeHtml(value)
+    .replace(/`([^`]+)`/g, '<code>$1</code>')
+    .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
   const pattern = /\[([^\]]+)\]\(([^)]*)\)/g
   let cursor = 0
   for (const match of source.matchAll(pattern)) {
     const index = match.index ?? 0
-    pieces.push(escapeHtml(source.slice(cursor, index)))
+    pieces.push(formatText(source.slice(cursor, index)))
     const label = match[1]!
     const target = safeHref(match[2]!, file, line)
-    pieces.push(`<a href="${escapeHtml(target)}">${escapeHtml(label)}</a>`)
+    pieces.push(`<a href="${escapeHtml(target)}">${formatText(label)}</a>`)
     cursor = index + match[0].length
   }
-  pieces.push(escapeHtml(source.slice(cursor)))
-  return pieces.map((piece) => piece
-    .replace(/`([^`]+)`/g, '<code>$1</code>')
-    .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
-  ).join('')
+  pieces.push(formatText(source.slice(cursor)))
+  return pieces.join('')
 }
 
 export function renderMarkdown(source: string, file = '<markdown>'): string {

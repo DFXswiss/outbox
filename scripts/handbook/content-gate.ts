@@ -21,10 +21,20 @@ function walk(directory: string): string[] {
 }
 
 export function comparePngSets(manifestPaths: string[], diskPaths: string[]): string[] {
-  const normalize = (path: string) => path.split(sep).join('/').toLowerCase()
+  const normalize = (path: string) => path.split(sep).join('/')
   const fromManifest = new Set(manifestPaths.filter((path) => extname(path).toLowerCase() === '.png').map(normalize))
   const fromDisk = new Set(diskPaths.filter((path) => extname(path).toLowerCase() === '.png').map(normalize))
   const differences: string[] = []
+  const caseCollisions = new Map<string, Set<string>>()
+  for (const path of [...fromManifest, ...fromDisk]) {
+    const key = path.toLocaleLowerCase('en')
+    const paths = caseCollisions.get(key) ?? new Set<string>()
+    paths.add(path)
+    caseCollisions.set(key, paths)
+  }
+  for (const paths of caseCollisions.values()) {
+    if (paths.size > 1) differences.push(`case-colliding image paths: ${[...paths].sort().join(', ')}`)
+  }
   for (const path of fromManifest) if (!fromDisk.has(path)) differences.push(`manifest image missing on disk: ${path}`)
   for (const path of fromDisk) if (!fromManifest.has(path)) differences.push(`unmanifested image on disk: ${path}`)
   if (fromManifest.size === 0) differences.push('the built image set is empty')
@@ -32,21 +42,37 @@ export function comparePngSets(manifestPaths: string[], diskPaths: string[]): st
 }
 
 export function validateQrAllowlist(allowlist: Record<string, RegExp[]>, imagePaths: string[], decoded: Record<string, string[]>): string[] {
-  const normalize = (path: string) => path.split(sep).join('/').toLowerCase()
+  const normalize = (path: string) => path.split(sep).join('/')
   const imageSet = new Set(imagePaths.map(normalize))
   const allowlistByPath = new Map(Object.entries(allowlist).map(([path, patterns]) => [normalize(path), patterns]))
   const decodedByPath = new Map(Object.entries(decoded).map(([path, payloads]) => [normalize(path), payloads]))
   const errors: string[] = []
+  const allPaths = [...imagePaths, ...Object.keys(allowlist), ...Object.keys(decoded)].map(normalize)
+  const allowlistPaths = new Map<string, Set<string>>()
+  for (const path of allPaths) {
+    const key = path.toLocaleLowerCase('en')
+    const paths = allowlistPaths.get(key) ?? new Set<string>()
+    paths.add(path)
+    allowlistPaths.set(key, paths)
+  }
+  for (const paths of allowlistPaths.values()) {
+    if (paths.size > 1) errors.push(`case-colliding QR allowlist paths: ${[...paths].sort().join(', ')}`)
+  }
   for (const [path, patterns] of Object.entries(allowlist)) {
     const key = normalize(path)
     if (!imageSet.has(key)) errors.push(`QR allowlist entry has no image: ${path}`)
     if (!patterns.length) errors.push(`QR allowlist entry has no payload patterns: ${path}`)
-    if (!(decodedByPath.get(key) ?? []).length) errors.push(`QR allowlist entry has no QR payload: ${path}`)
+    const payloads = decodedByPath.get(key) ?? []
+    if (!payloads.length) errors.push(`QR allowlist entry has no QR payload: ${path}`)
+    for (const pattern of patterns) {
+      if (pattern.global || pattern.sticky) errors.push(`QR allowlist pattern must not use g or y flags: ${path}: ${pattern}`)
+      else if (!payloads.some((payload) => pattern.test(payload))) errors.push(`QR allowlist pattern matches no payload: ${path}: ${pattern}`)
+    }
   }
   for (const [path, payloads] of Object.entries(decoded)) {
     const patterns = allowlistByPath.get(normalize(path))
     for (const payload of payloads) {
-      if (!patterns?.some((pattern) => pattern.test(payload))) errors.push(`unexpected QR payload in ${path}: ${payload}`)
+      if (!patterns?.some((pattern) => !pattern.global && !pattern.sticky && pattern.test(payload))) errors.push(`unexpected QR payload in ${path}: ${payload}`)
     }
   }
   return errors.sort()
@@ -73,20 +99,20 @@ export function levenshteinAtMostOne(left: string, right: string): boolean {
   return edits + Number(i < left.length || j < right.length) <= 1
 }
 
-export function findUnexpectedTokens(image: string, text: string, vocabulary: Set<string>): string[] {
+export function findUnexpectedTokens(_image: string, text: string, vocabulary: Set<string>): string[] {
   const words = [...vocabulary].filter((word) => word.length >= 5)
   return [...new Set(tokenize(text))].filter((token) =>
     !vocabulary.has(token) && !words.some((word) => levenshteinAtMostOne(token, word))
-  ).map((token) => `${image}: unexpected OCR token "${token}"`)
+  ).map((token) => `unexpected OCR token "${token}"`)
 }
 
-export function findSensitiveText(image: string, text: string): string[] {
+export function findSensitiveText(_image: string, text: string): string[] {
   const errors: string[] = []
-  if (/\beyJ[A-Za-z0-9_-]{12,}\b/.test(text)) errors.push(`${image}: JWT-like text detected`)
-  if (/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i.test(text)) errors.push(`${image}: email address detected`)
-  if (/(?:\b[0-9a-f]{24,}\b|\b[A-Za-z0-9+/]{24,}={0,2}\b)/i.test(text)) errors.push(`${image}: long encoded value detected`)
+  if (/\beyJ[A-Za-z0-9_-]{12,}\b/.test(text)) errors.push('JWT-like text detected')
+  if (/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i.test(text)) errors.push('email address detected')
+  if (/(?:\b[0-9a-f]{24,}\b|\b[A-Za-z0-9+/]{24,}={0,2}\b)/i.test(text)) errors.push('long encoded value detected')
   for (const match of text.matchAll(/https?:\/\/([^\s/]+)/gi)) {
-    if (match[1]!.toLowerCase() !== 'x.com') errors.push(`${image}: URL host is not allowed: ${match[1]}`)
+    if (match[1]!.toLowerCase() !== 'x.com') errors.push(`URL host is not allowed: ${match[1]}`)
   }
   return errors
 }

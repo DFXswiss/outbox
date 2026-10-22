@@ -22,6 +22,7 @@ USER node
 STOPSIGNAL SIGTERM
 # Deployment stop grace must be at least 100 seconds for the 90-second publish budget;
 # otherwise SIGKILL can interrupt a post that will be marked uncertain on the next boot.
+# /healthz always returns 200; require the queue to run. A bad X probe or missing rules cannot be fixed by restarting and must not cause a restart loop.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-  CMD node -e "fetch('http://127.0.0.1:'+(process.env.PORT||3000)+'/healthz').then(r=>process.exit(r.status===200?0:1)).catch(()=>process.exit(1))"
+  CMD node -e "fetch('http://127.0.0.1:'+(process.env.PORT||3000)+'/healthz').then(r=>r.status===200?r.json():Promise.reject()).then(j=>process.exit(j.queueRunning===true?0:1)).catch(()=>process.exit(1))"
 CMD ["node", "--import", "tsx", "src/main.ts"]

@@ -34,7 +34,12 @@ afterEach(() => {
 
 describe('handbook content gate rules', () => {
   it('requires the manifest image set to match the disk image set exactly', () => {
-    expect(comparePngSets(['screenshots/A.png'], ['screenshots/a.PNG'])).toEqual([])
+    expect(comparePngSets(['screenshots/A.png'], ['screenshots/a.PNG'])).toContain('case-colliding image paths: screenshots/A.png, screenshots/a.PNG')
+    expect(comparePngSets(['screenshots/A.png'], ['screenshots/a.png'])).toEqual([
+      'case-colliding image paths: screenshots/A.png, screenshots/a.png',
+      'manifest image missing on disk: screenshots/A.png',
+      'unmanifested image on disk: screenshots/a.png'
+    ])
     expect(comparePngSets(['screenshots/a.png'], ['screenshots/b.png'])).toContain('manifest image missing on disk: screenshots/a.png')
     expect(comparePngSets([], [])).toContain('the built image set is empty')
     expect(comparePngSets([], ['screenshots/orphan.png'])).toContain('unmanifested image on disk: screenshots/orphan.png')
@@ -49,30 +54,42 @@ describe('handbook content gate rules', () => {
     expect(validateQrAllowlist(allowlist, ['screenshots/code.png'], { 'screenshots/code.png': ['https://x.com/handbook_demo'] })).toEqual([])
     expect(validateQrAllowlist(allowlist, [], {})).toEqual([
       'QR allowlist entry has no QR payload: screenshots/code.png',
-      'QR allowlist entry has no image: screenshots/code.png'
+      'QR allowlist entry has no image: screenshots/code.png',
+      'QR allowlist pattern matches no payload: screenshots/code.png: /^https:\\/\\/x\\.com\\//'
     ])
     expect(validateQrAllowlist({}, ['screenshots/code.png'], { 'screenshots/code.png': ['https://example.invalid'] })).toContain('unexpected QR payload in screenshots/code.png: https://example.invalid')
+    expect(validateQrAllowlist({ 'screenshots/code.png': [/^https:\/\/elsewhere\.com\//] }, ['screenshots/code.png'], { 'screenshots/code.png': ['https://x.com/post'] })
+      .some((error) => error.startsWith('QR allowlist pattern matches no payload: screenshots/code.png: '))).toBe(true)
+    expect(validateQrAllowlist({ 'screenshots/code.png': [/x/g] }, ['screenshots/code.png'], { 'screenshots/code.png': ['x'] }))
+      .toContain('QR allowlist pattern must not use g or y flags: screenshots/code.png: /x/g')
+    expect(validateQrAllowlist({ 'screenshots/Code.png': [/^https:\/\/x\.com\//] }, ['screenshots/code.png'], { 'screenshots/code.png': ['https://x.com/post'] }))
+      .toContain('QR allowlist entry has no image: screenshots/Code.png')
   })
 
   it('allows OCR tokens from source vocabulary and one-character noise', () => {
     const vocabulary = new Set(tokenize('composer submitted status'))
     expect(findUnexpectedTokens('screen.png', 'composr submitted', vocabulary)).toEqual([])
-    expect(findUnexpectedTokens('screen.png', 'unlistedword', vocabulary)).toEqual(['screen.png: unexpected OCR token "unlistedword"'])
+    expect(findUnexpectedTokens('screen.png', 'unlistedword', vocabulary)).toEqual(['unexpected OCR token "unlistedword"'])
     expect(levenshteinAtMostOne('status', 'statuz')).toBe(true)
     expect(levenshteinAtMostOne('status', 'stazuz')).toBe(false)
     expect(findUnexpectedTokens('screen.png', 'stazuz', new Set(['status']))).toEqual([
-      'screen.png: unexpected OCR token "stazuz"'
+      'unexpected OCR token "stazuz"'
     ])
   })
 
   it('does not apply OCR typo tolerance to four-letter vocabulary words', () => {
     expect(findUnexpectedTokens('screen.png', 'sand', new Set(['send']))).toEqual([
-      'screen.png: unexpected OCR token "sand"'
+      'unexpected OCR token "sand"'
     ])
   })
 
   it('blocks token-like secrets, addresses, and non-X URLs', () => {
-    expect(findSensitiveText('screen.png', 'eyJabcdefghijklmno user@example.invalid abcdef0123456789abcdef012345 https://example.invalid')).toHaveLength(4)
+    expect(findSensitiveText('screen.png', 'eyJabcdefghijklmno user@example.invalid abcdef0123456789abcdef012345 https://example.invalid')).toEqual([
+      'JWT-like text detected',
+      'email address detected',
+      'long encoded value detected',
+      'URL host is not allowed: example.invalid'
+    ])
     expect(findSensitiveText('screen.png', 'https://x.com/handbook_demo/status/12345')).toEqual([])
   })
 

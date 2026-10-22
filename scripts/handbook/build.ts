@@ -1,7 +1,8 @@
 import { createHash } from 'node:crypto'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import * as fs from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, statSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from 'node:path'
+import { basename, dirname, extname, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { renderMarkdown } from './markdown'
 
@@ -16,6 +17,18 @@ export type Artifact = { category: string; source: string; outputPath: string; s
 function sha256(data: Buffer | string): string {
   return createHash('sha256').update(data).digest('hex')
 }
+
+export const CAPTURE_INPUTS = ['scripts/handbook/capture.mjs', 'src/html.ts', 'src/server.ts'].sort((a, b) => a.localeCompare(b, 'en'))
+
+function captureInputsSha256(repoRoot: string): string {
+  const hash = createHash('sha256')
+  for (const input of CAPTURE_INPUTS) {
+    hash.update(input).update('\0').update(readFileSync(join(repoRoot, input))).update('\0')
+  }
+  return hash.digest('hex')
+}
+
+export type ExchangeFileSystem = Pick<typeof fs, 'existsSync' | 'mkdtempSync' | 'renameSync' | 'rmSync'>
 
 function files(directory: string): string[] {
   return readdirSync(directory).sort((a, b) => a.localeCompare(b, 'en'))
@@ -56,7 +69,7 @@ export function discoverHandbook(
     const imageByStem = new Map(imageFiles.map((name) => [name.slice(0, -extname(name).length).toLowerCase(), name]))
     const textByStem = new Map(markdownFiles.map((name) => [name.slice(0, -extname(name).length).toLowerCase(), name]))
     const groupSource = readFileSync(groupFile, 'utf8')
-    const title = /^#\s+(.+)\s*$/.exec(groupSource.split(/\r?\n/, 1)[0] ?? '')?.[1]
+    const title = parseHeadingTitle(groupSource.split(/\r?\n/, 1)[0] ?? '')
     if (!title) errors.push(`${groupFile}: first line must be a chapter title beginning with #`)
     const images: Screenshot[] = []
     for (const [stem, imageName] of imageByStem) {
@@ -65,12 +78,12 @@ export function discoverHandbook(
       const text = join(groupDir, textName)
       const content = readFileSync(text, 'utf8')
       const lines = content.split(/\r?\n/)
-      const title = /^#\s+(.+)$/.exec(lines[0] ?? '')?.[1]
-      if (!title) {
+      const screenshotTitle = parseHeadingTitle(lines[0] ?? '')
+      if (!screenshotTitle) {
         errors.push(`${text}: first line must be a title beginning with #`)
         continue
       }
-      images.push({ group: groupName, name: imageName.slice(0, -extname(imageName).length), title, description: lines.slice(1).join('\n'), image: join(groupDir, imageName), text })
+      images.push({ group: groupName, name: imageName.slice(0, -extname(imageName).length), title: screenshotTitle, description: lines.slice(1).join('\n'), image: join(groupDir, imageName), text })
     }
     if (imageFiles.length === 0) errors.push(`${groupDir}: group has no screenshots`)
     groups.push({ name: groupName, title: title ?? groupName, intro: groupSource, images })
@@ -80,6 +93,10 @@ export function discoverHandbook(
   if (screenshots.length < minScreenshots) throw new Error(`Screenshot floor not met: ${screenshots.length} < ${minScreenshots}`)
   if (groups.length < minGroups) throw new Error(`Group floor not met: ${groups.length} < ${minGroups}`)
   return { groups, screenshots }
+}
+
+function parseHeadingTitle(line: string): string | undefined {
+  return /^#\s+(.+?)\s*$/.exec(line)?.[1]?.trim() || undefined
 }
 
 export function resolveOutputDirectory(outputDir: string, repoRoot: string): string {
@@ -106,7 +123,6 @@ export function resolveOutputDirectory(outputDir: string, repoRoot: string): str
   if (normalized === '/' || normalized === home || isRepoAncestor || rel === '' || (!rel.startsWith(`..${sep}`) && rel !== '..')) {
     throw new Error('Output directory must be outside the repository, its ancestors, and the home directory')
   }
-  if (!isAbsolute(normalized)) throw new Error('Invalid output directory')
   return normalized
 }
 
@@ -176,25 +192,27 @@ export function registerOutputDestination(destinations: Map<string, string>, out
 export function buildHandbook(
   repoRoot: string,
   requestedOutput: string,
-  options: { minScreenshots?: number; minGroups?: number } = {}
+  options: { minScreenshots?: number; minGroups?: number; fs?: ExchangeFileSystem } = {}
 ): { outputDir: string; manifest: { artifacts: Artifact[] } } {
+  const exchangeFs = options.fs ?? fs
   const outputDir = resolveOutputDirectory(requestedOutput, repoRoot)
-  const htmlSource = join(repoRoot, 'src/html.ts')
   const capturePath = join(repoRoot, 'docs/handbook/screenshots/capture.json')
-  const capture = JSON.parse(readFileSync(capturePath, 'utf8')) as { htmlSha256?: string }
-  if (capture.htmlSha256 !== sha256(readFileSync(htmlSource))) throw new Error('screenshots are stale, run the capture')
+  const capture = JSON.parse(readFileSync(capturePath, 'utf8')) as { inputs?: string[]; inputsSha256?: string }
+  if (JSON.stringify(capture.inputs) !== JSON.stringify(CAPTURE_INPUTS) || capture.inputsSha256 !== captureInputsSha256(repoRoot)) {
+    throw new Error('screenshots are stale, run the capture')
+  }
   const discovered = discoverHandbook(join(repoRoot, 'docs/handbook/screenshots'), options)
   const fontSourceDir = join(repoRoot, 'src/assets/fonts')
   const fontFiles = existsSync(fontSourceDir)
     ? readdirSync(fontSourceDir, { withFileTypes: true }).filter((entry) => entry.isFile() && (entry.name.endsWith('.woff2') || entry.name === 'Inter-LICENSE.txt')).map((entry) => entry.name).sort()
     : []
   mkdirSync(dirname(outputDir), { recursive: true })
-  let temporaryDir = mkdtempSync(join(dirname(outputDir), `.${basename(outputDir)}-tmp-`))
-  const backupCandidate = () => mkdtempSync(join(dirname(outputDir), `.${basename(outputDir)}-backup-`))
+  let temporaryDir = exchangeFs.mkdtempSync(join(dirname(outputDir), `.${basename(outputDir)}-tmp-`))
+  const backupCandidate = () => exchangeFs.mkdtempSync(join(dirname(outputDir), `.${basename(outputDir)}-backup-`))
   try {
-    return buildInDirectory(repoRoot, outputDir, temporaryDir, discovered, fontSourceDir, fontFiles, backupCandidate)
+    return buildInDirectory(repoRoot, outputDir, temporaryDir, discovered, fontSourceDir, fontFiles, backupCandidate, exchangeFs)
   } catch (error) {
-    if (temporaryDir && existsSync(temporaryDir)) rmSync(temporaryDir, { recursive: true, force: true })
+    if (temporaryDir && exchangeFs.existsSync(temporaryDir)) exchangeFs.rmSync(temporaryDir, { recursive: true, force: true })
     throw error
   }
 }
@@ -206,7 +224,8 @@ function buildInDirectory(
   discovered: DiscoveredHandbook,
   fontSourceDir: string,
   fontFiles: string[],
-  backupCandidate: () => string
+  backupCandidate: () => string,
+  exchangeFs: ExchangeFileSystem
 ): { outputDir: string; manifest: { artifacts: Artifact[] } } {
   mkdirSync(join(temporaryDir, 'screenshots'), { recursive: true })
   const artifacts: Artifact[] = []
@@ -251,19 +270,31 @@ function buildInDirectory(
   const manifest = { artifacts }
   writeFileSync(join(temporaryDir, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`)
   let backupDir: string | null = null
-  if (existsSync(outputDir)) {
+  if (exchangeFs.existsSync(outputDir)) {
     backupDir = backupCandidate()
-    rmSync(backupDir, { recursive: true, force: true })
-    renameSync(outputDir, backupDir)
+    exchangeFs.rmSync(backupDir, { recursive: true, force: true })
+    exchangeFs.renameSync(outputDir, backupDir)
   }
   try {
-    renameSync(temporaryDir, outputDir)
+    exchangeFs.renameSync(temporaryDir, outputDir)
     temporaryDir = ''
   } catch (error) {
-    if (backupDir && existsSync(backupDir)) renameSync(backupDir, outputDir)
+    if (backupDir && exchangeFs.existsSync(backupDir)) {
+      try {
+        exchangeFs.renameSync(backupDir, outputDir)
+      } catch (restoreError) {
+        throw new Error(`Failed to replace output and restore backup; output path: ${outputDir}; backup path: ${backupDir}; replacement error: ${error instanceof Error ? error.message : String(error)}; restore error: ${restoreError instanceof Error ? restoreError.message : String(restoreError)}`)
+      }
+    }
     throw error
   }
-  if (backupDir) rmSync(backupDir, { recursive: true, force: true })
+  if (backupDir) {
+    try {
+      exchangeFs.rmSync(backupDir, { recursive: true, force: true })
+    } catch (error) {
+      process.stderr.write(`Warning: handbook built successfully, but could not remove backup ${backupDir}: ${error instanceof Error ? error.message : String(error)}\n`)
+    }
+  }
   return { outputDir, manifest }
 }
 

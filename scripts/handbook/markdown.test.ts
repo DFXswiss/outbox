@@ -33,6 +33,26 @@ describe('handbook markdown renderer', () => {
     expect(html).not.toContain('<strong>b</a>')
   })
 
+  it('does not apply inline markup to a link destination', () => {
+    const html = renderMarkdown('[a](https://x.com/**b**)', 'guide.md')
+    expect(html).toContain('<a href="https://x.com/**b**">a</a>')
+    expect(html).not.toContain('<strong>')
+    expect(html).not.toContain('<strong>b</strong>')
+  })
+
+  it.each(['&#1114112;', '&#x110000;'])('reports the first invalid numeric code point %s with its source file and line', (reference) => {
+    expect(() => renderMarkdown(`before\n\n[x](https://x.com/${reference})`, 'guide.md'))
+      .toThrow('guide.md:3: invalid numeric character reference')
+  })
+
+  it('does not report the last valid Unicode code point as an invalid numeric character reference', () => {
+    try {
+      renderMarkdown('before\n\n[x](https://x.com/&#1114111;)', 'guide.md')
+    } catch (error) {
+      expect((error as Error).message).not.toContain('invalid numeric character reference')
+    }
+  })
+
   it.each([
     'javascript:alert(1)',
     'JaVaScRiPt:alert(1)',

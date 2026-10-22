@@ -177,9 +177,23 @@ async function pageHeight(page) {
   await page.setViewportSize({ width: viewport.width, height: Math.max(120, height) })
 }
 
-async function capture(page, group, name, expected, { write = true } = {}) {
+const allDecisionButtons = ['Approve', 'Reject', 'Retry', 'Mark as sent', 'Mark as failed']
+const queueStateButtons = allDecisionButtons
+
+async function capture(page, group, name, expected, { write = true, forbiddenButtons = [] } = {}) {
   const content = await page.locator('body').innerText()
   for (const text of expected) if (!content.toLowerCase().includes(text.toLowerCase())) fail(`${group}/${name}: expected page text ${JSON.stringify(text)}; got ${JSON.stringify(content)}`)
+  const forbidden = [
+    ...(group === '03-review-author' ? allDecisionButtons : []),
+    ...(group === '02-review-approver' && name === '03-submitted-past' ? ['Approve'] : []),
+    ...forbiddenButtons
+  ]
+  const buttonTexts = await page.locator('button:visible').allInnerTexts()
+  for (const label of forbidden) {
+    if (buttonTexts.some((text) => text.toLowerCase().includes(label.toLowerCase()))) {
+      fail(`${group}/${name}: forbidden visible button ${JSON.stringify(label)} is present`)
+    }
+  }
   await pageHeight(page)
   const image = join(outputRoot, group, `${name}.png`)
   if (write) mkdirSync(dirname(image), { recursive: true })
@@ -191,8 +205,11 @@ async function capture(page, group, name, expected, { write = true } = {}) {
 }
 
 async function captureSharedState(composerPage, approverPage, name, expected) {
-  const approverImage = await capture(approverPage, '02-review-approver', name, expected)
-  const composerImage = await capture(composerPage, '03-review-author', name, expected, { write: false })
+  const denied = name === '07-failed' ? ['Mark as sent', 'Mark as failed']
+    : name === '08-uncertain' ? ['Retry']
+      : queueStateButtons
+  const approverImage = await capture(approverPage, '02-review-approver', name, expected, { forbiddenButtons: denied })
+  const composerImage = await capture(composerPage, '03-review-author', name, expected, { write: false, forbiddenButtons: denied })
   if (approverImage.equals(composerImage)) return
   const path = join(outputRoot, '03-review-author', `${name}.png`)
   mkdirSync(dirname(path), { recursive: true })
@@ -412,8 +429,10 @@ async function main() {
   const unpaired = markdown.filter((file) => !pngKeys.has(key(file)))
   if (missing.length || unpaired.length) fail(`Capture pairs are incomplete. Missing text for: ${missing.join(', ')}. Missing images for: ${unpaired.join(', ')}`)
   written = pngs.map((path) => join(outputRoot, path))
-  const htmlSha256 = createHash('sha256').update(readFileSync(join(repoRoot, 'src/html.ts'))).digest('hex')
-  writeFileSync(join(outputRoot, 'capture.json'), `${JSON.stringify({ htmlSha256, viewport: captureViewport, deviceScaleFactor, count: written.length }, null, 2)}\n`)
+  const inputs = ['scripts/handbook/capture.mjs', 'src/html.ts', 'src/server.ts'].sort((left, right) => left.localeCompare(right, 'en'))
+  const inputHash = createHash('sha256')
+  for (const input of inputs) inputHash.update(input).update('\0').update(readFileSync(join(repoRoot, input))).update('\0')
+  writeFileSync(join(outputRoot, 'capture.json'), `${JSON.stringify({ inputs, inputsSha256: inputHash.digest('hex'), viewport: captureViewport, deviceScaleFactor, count: written.length }, null, 2)}\n`)
   process.stdout.write(`Captured ${written.length} screenshots\n`)
 }
 

@@ -12,7 +12,7 @@ The Composer has the `OUTBOX` role. A composer can submit a post. Retraction is 
 
 - `pending`: approved and waiting for its scheduled time.
 - `in-flight`: the service has started sending the post.
-- `sent`: X accepted the post. A permalink may be shown.
+- `sent`: X confirmed the post, or an approver resolved an uncertain post as sent after checking X. A permalink may be shown.
 - `failed`: the service recorded a definite failure. An approver can retry it.
 - `uncertain`: the service cannot tell whether X accepted the post. It is never retried automatically because that could publish a duplicate. An approver must mark it sent or failed.
 
