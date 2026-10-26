@@ -94,3 +94,5 @@ imageField.addEventListener('change', async () => {
     imagePreview.hidden = false
   }
 })
+
+if (textField.value.trim() !== '') void checkText(++requestNumber)

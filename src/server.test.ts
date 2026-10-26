@@ -356,6 +356,25 @@ describe('POST /api/submit', () => {
     expect(entryCount(h.db)).toBe(0)
   })
 
+  it('renders a blocking finding page with an enabled submit button for an HTML form submit', async () => {
+    const h = await start()
+    const res = await call(h.port, '/api/submit', {
+      method: 'POST',
+      token: TOKEN_A,
+      headers: {
+        accept: 'text/html',
+        'content-type': 'application/x-www-form-urlencoded'
+      },
+      body: new URLSearchParams({ text: BLOCKING, scheduledAt: FUTURE_LOCAL }).toString()
+    })
+
+    expect(res.status).toBe(409)
+    expect(res.text).toContain('Blocking review finding.')
+    const submitButton = res.text.match(/<button id="submit-button"[^>]*>/)?.[0]
+    expect(submitButton).toBeDefined()
+    expect(submitButton).not.toMatch(/\sdisabled(?:\s|=|>)/)
+  })
+
   it('returns 409 when the scheduled time is already past', async () => {
     const h = await start()
     const res = await submitJson(h.port, TOKEN_A, { text: CLEAN, scheduledAt: PAST_LOCAL })

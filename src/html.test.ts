@@ -79,6 +79,20 @@ describe('composer markup', () => {
     expect(html).toContain('aria-hidden="true"')
   })
 
+  it('renders the submit button enabled when a blocking finding is recorded', () => {
+    const html = renderComposerPage({
+      text: 'A blocking claim.',
+      scheduledAt: '',
+      charCount: 18,
+      costHint: 'No cost estimate.',
+      recorded: { blocking: ['x'], hints: [] }
+    })
+    const submitButton = html.match(/<button id="submit-button"[^>]*>/)?.[0]
+
+    expect(submitButton).toBeDefined()
+    expect(submitButton).not.toMatch(/\sdisabled(?:\s|=|>)/)
+  })
+
   it('omits the checked scope and renders the empty-state hint', () => {
     const blank = renderComposerPage({
       text: '',

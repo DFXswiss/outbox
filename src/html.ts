@@ -200,7 +200,7 @@ ${error}
   <div class="field"><label for="text">Text</label><textarea id="text" name="text" required>${escapeHtml(input.text)}</textarea></div>
   <fieldset class="schedule"><legend>Scheduled time (Europe/Zurich)</legend><div class="field"><label for="scheduledDate">Date</label><input id="scheduledDate" name="scheduledDate" type="date" required value="${escapeHtml(date)}"></div><div class="field"><label for="scheduledHour">Hour</label><select id="scheduledHour" name="scheduledHour" required>${hours.map((value) => `<option value="${value}"${hour === value ? ' selected' : ''}>${value}</option>`).join('')}</select></div><div class="field"><label for="scheduledMinute">Minute</label><select id="scheduledMinute" name="scheduledMinute" required>${minutes.map((value) => `<option value="${value}"${minute === value ? ' selected' : ''}>${value}</option>`).join('')}</select></div></fieldset>
   <div class="field"><label for="image">Image (optional, PNG or JPEG, up to 5 MB)</label><input id="image" name="image" type="file" accept="image/png,image/jpeg"><p class="meta" id="image-message">${input.imageDropped ? 'Choose the image again — it was not kept.' : ''}</p></div>
-  <button id="submit-button" type="submit"${input.recorded?.blocking.length ? ' disabled aria-describedby="review-checks"' : ''}>Submit for approval</button>
+  <button id="submit-button" type="submit">Submit for approval</button>
 </form>
 <section class="card preview" aria-label="Preview">
   <div class="text" id="preview-text">${input.text ? escapeHtml(input.text) : '<em>Preview</em>'}</div>
