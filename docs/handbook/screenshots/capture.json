@@ -9,6 +9,7 @@
     "scripts/handbook/capture.mjs",
     "src/alerts.ts",
     "src/app.ts",
+    "src/assets/composer.js",
     "src/assets/fonts/Inter-Bold.woff2",
     "src/assets/fonts/Inter-LICENSE.txt",
     "src/assets/fonts/Inter-Regular.woff2",
@@ -22,6 +23,7 @@
     "src/healthcheck.mjs",
     "src/html.ts",
     "src/identity.ts",
+    "src/image.ts",
     "src/log.ts",
     "src/main.ts",
     "src/publisher.ts",
@@ -32,11 +34,11 @@
     "src/time.ts",
     "src/x-client.ts"
   ],
-  "inputsSha256": "22c4620b0acd246347783052775b9dec368af6067f34529e2c055abe615554de",
+  "inputsSha256": "8a0cf0a6e9b83eff776f4651437e788e90dc57ccc6f69bbfccfe72c8ad2ca6bc",
   "viewport": {
     "width": 760,
     "height": "visible body content + 24px"
   },
   "deviceScaleFactor": 2,
-  "count": 31
+  "count": 41
 }

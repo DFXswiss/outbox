@@ -1,3 +1,3 @@
 # Submitted after its scheduled time
 
-The page shows the `submitted` chip, a notice that the scheduled time has passed, and the review check card with “No blocking findings and no hints.” and the review scope. Approve is not shown. Reject remains available. Rejecting records a rejection; the post is not queued.
+The page shows the Outbox brand and New post and Posts navigation. The Review heading is followed by the `submitted` chip, scheduled date and time, and “Waiting for approval.” A notice says the scheduled time has already passed. The preview shows the post text and the review card says “No blocking findings and no hints.” Only Reject is shown.

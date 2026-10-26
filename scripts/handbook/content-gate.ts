@@ -126,7 +126,7 @@ function defaultRunTool(name: string, args: string[]): ToolResult {
 
 function sourceVocabulary(repoRoot: string): Set<string> {
   const sourceFiles = [
-    ...walk(join(repoRoot, 'src')).filter((path) => path.endsWith('.ts') && !path.endsWith('.test.ts')),
+    ...walk(join(repoRoot, 'src')).filter((path) => (path.endsWith('.ts') && !path.endsWith('.test.ts')) || path.endsWith('.js')),
     ...walk(join(repoRoot, 'review')).filter((path) => path.endsWith('.ts') && !path.endsWith('.test.ts'))
   ]
   const sourceContent = sourceFiles.map((path) => readFileSync(path, 'utf8')).join('\n')

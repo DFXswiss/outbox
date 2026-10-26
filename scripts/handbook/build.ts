@@ -6,8 +6,8 @@ import { basename, dirname, extname, join, relative, resolve, sep } from 'node:p
 import { fileURLToPath } from 'node:url'
 import { renderMarkdown } from './markdown'
 
-export const MIN_SCREENSHOTS = 31 // floor, raise with the set
-export const MIN_GROUPS = 4 // floor, raise with the set
+export const MIN_SCREENSHOTS = 41 // floor, raise with the set
+export const MIN_GROUPS = 5 // floor, raise with the set
 
 export type Screenshot = { group: string; name: string; title: string; description: string; image: string; text: string }
 export type ScreenshotGroup = { name: string; title: string; intro: string; images: Screenshot[] }

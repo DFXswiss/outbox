@@ -14,7 +14,7 @@ npm run handbook:build -- "$OUT"
 npm run handbook:gate -- "$OUT"
 ```
 
-The capture starts the real service with temporary storage and local API stubs and takes about nine minutes, because sent, failed, uncertain and in-flight posts have to become due. Review every expected state, then set `MIN_SCREENSHOTS` and `MIN_GROUPS` to the captured counts and update the coverage counts here. These are lower bounds; a larger capture set is allowed. The build discovers groups and image/text pairs from disk; it has no image mapping table.
+The capture starts the real service with temporary storage and local API stubs and takes about 15–30 minutes. Sent, failed, uncertain, in-flight and past-time states wait for scheduled five-minute slots. The capture generates its neutral 600 × 315 PNG in memory; it does not add a test image file to the repository. Review every expected state, then set `MIN_SCREENSHOTS` and `MIN_GROUPS` to the captured counts and update the coverage counts here. These are lower bounds; a larger capture set is allowed. The build discovers groups and image/text pairs from disk; it has no image mapping table.
 
 The build checks PNG signatures and sizes, pair completeness, capture freshness, output paths, and local links. It only replaces an empty output directory or one with a valid handbook `manifest.json`; it refuses non-empty unrelated directories and symlink targets.
 
@@ -22,7 +22,7 @@ The content gate checks every built PNG for QR payloads and OCR text. QR payload
 
 ## Coverage
 
-Expected captured images by group: `01-composer`: 4; `02-review-approver`: 10; `03-review-author`: 5; `04-results-and-errors`: 12. Total: 31. The capture compares pending, in-flight, sent, rejected, and retracted Composer and Approver views byte-for-byte. Matching views share the Approver capture; a differing Composer image requires its own Markdown description and causes capture to stop until that description exists.
+Expected captured images by group: `01-composer`: 9; `02-review-approver`: 11; `03-review-author`: 5; `04-results-and-errors`: 12; `05-posts`: 4. Total: 41. The capture compares pending, in-flight, sent, rejected, and retracted Composer and Approver views byte-for-byte. Matching views share the Approver capture; a differing Composer image requires its own Markdown description and causes capture to stop until that description exists.
 
 Known gaps (3 variants in 3 causes):
 

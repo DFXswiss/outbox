@@ -12,11 +12,12 @@ function gateFixture(): { root: string; built: string } {
   const built = join(root, 'built')
   const repo = join(root, 'repo')
   mkdirSync(join(built, 'screenshots', 'chapter'), { recursive: true })
-  mkdirSync(join(repo, 'src'), { recursive: true })
+  mkdirSync(join(repo, 'src', 'assets'), { recursive: true })
   mkdirSync(join(repo, 'review'), { recursive: true })
   mkdirSync(join(repo, 'docs', 'handbook'), { recursive: true })
   mkdirSync(join(repo, 'scripts', 'handbook'), { recursive: true })
   writeFileSync(join(repo, 'src', 'terms.ts'), "export const status = 'status'\n")
+  writeFileSync(join(repo, 'src', 'assets', 'composer.js'), "const note = 'Check unavailable — it runs again on submit. This image is larger than 5 MB. Choose a PNG or JPEG image.'\n")
   writeFileSync(join(repo, 'scripts', 'handbook', 'capture.mjs'), '')
   writeFileSync(join(repo, 'docs', 'handbook', 'intro.md'), '# Intro\n')
   writeFileSync(join(built, 'manifest.json'), JSON.stringify({ artifacts: [{ category: 'screenshot', outputPath: 'screenshots/chapter/page.png' }] }))
@@ -75,6 +76,12 @@ describe('handbook content gate rules', () => {
     expect(findUnexpectedTokens('screen.png', 'stazuz', new Set(['status']))).toEqual([
       'unexpected OCR token "stazuz"'
     ])
+  })
+
+  it('includes composer asset messages in the OCR vocabulary', () => {
+    const { root, built } = gateFixture()
+    const problems = gateBuiltHandbook(built, root, (name) => successfulTool(name, 'Check unavailable it runs again on submit This image is larger than 5 MB Choose a PNG or JPEG image'))
+    expect(problems.filter((problem) => problem.message.startsWith('unexpected OCR token'))).toEqual([])
   })
 
   it('does not apply OCR typo tolerance to four-letter vocabulary words', () => {

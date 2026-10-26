@@ -1,3 +1,3 @@
 # Compose and submit
 
-Write a post, choose a time in Europe/Zurich, and submit it for approval. The composer shows a preview and deterministic review checks. It does not publish or schedule a post by itself. Retraction is currently available only through the API; this page has no retract button.
+The navigation links to New post and Posts. Write a post, choose a date, hour, and minute in five-minute steps for Europe/Zurich, optionally attach a PNG or JPEG image, and submit it for approval. The preview and review checks update while text is typed. The composer does not publish or schedule a post by itself.

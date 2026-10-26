@@ -1,3 +1,3 @@
 # Request failed: not visible
 
-The page says Request failed and Not visible. A composer can view only entries authored by their account. Ask an approver to review the entry.
+The page shows the Outbox brand, an error icon, the heading “Request failed,” and the message “Not visible.”

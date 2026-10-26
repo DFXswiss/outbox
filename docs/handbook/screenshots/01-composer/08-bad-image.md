@@ -1,0 +1,3 @@
+# Image rejected by the server
+
+The page shows the Outbox brand and New post and Posts navigation. The Text field contains “A calm image accompanies this update.” The Scheduled time (Europe/Zurich) fields show a date, hour, and minute on a five-minute step. A cross icon precedes “Image must be a PNG or JPEG up to 5 MB.” After the server response, the image field shows the “Choose File” button and “No file chosen”. The note says “Choose the image again — it was not kept.” The preview shows the post text, character count, and cost hint and has no image symbol. The review card says “Checks appear here as you type.”

@@ -1,3 +1,3 @@
 # Submitted with review hints
 
-The page shows the `submitted` chip, post text, and review hints, including “A sentence is longer than 35 words.” The review scope appears beneath the findings. Hints do not prevent approval. This view has no decision controls; an approver decides whether to approve or reject the post.
+The page shows the Outbox brand and New post and Posts navigation. The Review heading is followed by the `submitted` chip, scheduled date and time, and “Waiting for approval.” The preview shows the long post text. The review card says “A sentence is longer than 35 words.” No decision buttons are shown.
