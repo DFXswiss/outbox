@@ -84,41 +84,49 @@ export function createPublisher(deps: PublisherDeps) {
       }
 
       try {
-        let result: PublishResult
+        let result: PublishResult | null = null
         let needsLogin = false
         let imageBytes: Buffer | null = null
-        if (post.imageSha256 !== null) {
-          const stored = deps.db.prepare('SELECT bytes FROM media WHERE sha256 = ?').get(post.imageSha256) as { bytes: Buffer } | undefined
-          imageBytes = stored?.bytes ?? null
-          if (!imageBytes) {
-            result = { channel: 'x', ok: false, error: 'image missing' }
-          } else if (contentHash(post.text, post.scheduledAt, imageBytes) !== post.contentHash) {
+        try {
+          if (post.imageSha256 !== null) {
+            const stored = deps.db.prepare('SELECT bytes FROM media WHERE sha256 = ?').get(post.imageSha256) as { bytes: Buffer } | undefined
+            imageBytes = stored?.bytes ?? null
+            if (!imageBytes) {
+              result = { channel: 'x', ok: false, error: 'image missing' }
+            } else if (contentHash(post.text, post.scheduledAt, imageBytes) !== post.contentHash) {
+              result = { channel: 'x', ok: false, error: 'content changed after approval' }
+            }
+          } else if (contentHash(post.text, post.scheduledAt, null) !== post.contentHash) {
             result = { channel: 'x', ok: false, error: 'content changed after approval' }
-          } else {
-            const published = await deps.x.postTweet(post.text, now() + budgetMs, imageBytes)
-            result = published.result
-            needsLogin = published.needsLogin
           }
-        } else if (
-          contentHash(post.text, post.scheduledAt, null) !== post.contentHash
-        ) {
+        } catch {
           result = {
             channel: 'x',
             ok: false,
-            error: 'content changed after approval'
+            error: 'unexpected publisher preparation failure'
           }
-        } else {
-          const published = await deps.x.postTweet(
-            post.text,
-            now() + budgetMs
-          )
-          result = published.result
-          needsLogin = published.needsLogin
+        }
+
+        if (result === null) {
+          try {
+            const published = imageBytes === null
+              ? await deps.x.postTweet(post.text, now() + budgetMs)
+              : await deps.x.postTweet(post.text, now() + budgetMs, imageBytes)
+            result = published.result
+            needsLogin = published.needsLogin
+          } catch {
+            result = {
+              channel: 'x',
+              ok: false,
+              uncertain: true,
+              error: 'unexpected publish failure'
+            }
+          }
         }
 
         const finished = finishPost(deps.db, {
           postId: post.postId,
-          result,
+          result: result!,
           now: now()
         })
         if (!finished.ok) {
@@ -133,14 +141,14 @@ export function createPublisher(deps: PublisherDeps) {
             deps.alert({
               kind: finished.status,
               postId: post.postId,
-              detail: result.error ?? finished.status
+              detail: result!.error ?? finished.status
             })
           }
           if (needsLogin) {
             deps.alert({
               kind: 'needs-login',
               postId: post.postId,
-              detail: result.error ?? 'X login required'
+              detail: result!.error ?? 'X login required'
             })
           }
         } catch {

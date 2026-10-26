@@ -226,9 +226,12 @@ async function parseFields(
       const fields: Record<string, string> = {}
       const images = form.getAll('image')
       if (images.length > 1) return { ok: false, status: 400, message: 'Only one image may be attached.' }
+      let textBytes = 0
       for (const [key, value] of form.entries()) {
         if (key === 'image') continue
         if (typeof value !== 'string') return { ok: false, status: 400, message: 'Form fields must be text.' }
+        textBytes += Buffer.byteLength(value, 'utf8')
+        if (textBytes > BODY_LIMIT) return { ok: false, status: 413, message: 'Request body is too large.' }
         fields[key] = value
       }
       const image = images[0]

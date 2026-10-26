@@ -10,6 +10,7 @@ const imagePreview = document.querySelector('#image-preview')
 const imageMessage = document.querySelector('#image-message')
 
 let requestNumber = 0
+let reviewController
 let imageSelection = 0
 let debounce
 let objectUrl
@@ -44,13 +45,16 @@ function renderFindings(blocking, hints) {
 
 async function checkText(sequence) {
   const text = textField.value
+  const controller = new AbortController()
+  reviewController = controller
   previewText.textContent = text || 'Preview'
   try {
     const response = await fetch('/api/review', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ text }),
-      credentials: 'same-origin'
+      credentials: 'same-origin',
+      signal: controller.signal
     })
     const result = await response.json()
     if (sequence !== requestNumber) return
@@ -59,16 +63,22 @@ async function checkText(sequence) {
     cost.textContent = result.costHint
     renderFindings(result.blocking, result.hints)
     unavailable.hidden = true
-  } catch {
+  } catch (error) {
     if (sequence !== requestNumber) return
+    if (error && error.name === 'AbortError') return
+    checks.replaceChildren()
     unavailable.hidden = false
     submit.disabled = false
     submit.removeAttribute('aria-describedby')
+  } finally {
+    if (reviewController === controller) reviewController = undefined
   }
 }
 
 textField.addEventListener('input', () => {
   window.clearTimeout(debounce)
+  if (reviewController) reviewController.abort()
+  reviewController = undefined
   const sequence = ++requestNumber
   debounce = window.setTimeout(() => void checkText(sequence), 400)
 })

@@ -29,7 +29,7 @@ export function nextSlotZurich(nowMs: number): ZurichSlot {
     const hour = pad2(candidate.getUTCHours())
     const minute = pad2(candidate.getUTCMinutes())
     const epochs = zurichCandidates(candidate.getUTCFullYear(), candidate.getUTCMonth() + 1, candidate.getUTCDate(), candidate.getUTCHours(), candidate.getUTCMinutes())
-    const epoch = epochs.find((value) => value >= target)
+    const epoch = epochs[0]
     if (epoch !== undefined && epoch >= target) return { date, hour, minute }
     candidate = new Date(candidate.getTime() + 5 * 60_000)
   }
@@ -64,21 +64,6 @@ function zurichCivil(epochMs: number): Civil {
 
 function sameCivil(left: Civil, right: Civil): boolean {
   return civilKey(left) === civilKey(right)
-}
-
-/**
- * Zurich is only ever UTC+1 or UTC+2. Trying both offsets avoids a search
- * whose failure branch would be untestable for real clock times. Returns
- * null when the civil time does not exist (the spring-forward gap).
- */
-export function zonedZurichToUtc(
-  year: number,
-  month: number,
-  day: number,
-  hour: number,
-  minute: number
-): number | null {
-  return zurichCandidates(year, month, day, hour, minute)[0] ?? null
 }
 
 /**

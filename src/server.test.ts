@@ -270,6 +270,16 @@ describe('POST /api/submit', () => {
     expect(h.db.prepare('SELECT mime, bytes FROM media WHERE sha256 = ?').get(entry.imageSha256)).toMatchObject({ mime: 'image/png' })
   })
 
+  it('rejects multipart text fields larger than the body limit', async () => {
+    const h = await start()
+    const form = new FormData()
+    form.set('text', 'x'.repeat(1_000_001))
+    const response = await call(h.port, '/api/submit', {
+      method: 'POST', token: TOKEN_A, headers: { accept: 'application/json' }, body: form
+    })
+    expect(response.status).toBe(413)
+  })
+
   it('accepts JPEG bytes and treats an empty file input as no image', async () => {
     const h = await start()
     const submitForm = async (image: Blob, filename: string) => {

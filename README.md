@@ -187,7 +187,6 @@ Blocking: forbidden claims, MiCAR-unsafe, provisional without qualifier. Hints: 
 | Route | Role | Effect |
 |---|---|---|
 | `GET /api/me` | OUTBOX or ADMIN | `{ account, user, role }` from payload |
-| `POST /api/drafts` | OUTBOX | text, image, scheduledAt (Zurich) |
 | `POST /api/review` | OUTBOX | findings |
 | `POST /api/submit` | OUTBOX | bundle; 409 on blocking / past time / bad image |
 | `GET /api/posts` | Admin → all; else Outbox → `authoredBy.account === payload.account`; else 403 | status list |

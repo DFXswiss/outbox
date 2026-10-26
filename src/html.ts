@@ -62,7 +62,6 @@ const STYLE = [
   '.finding.hint{color:var(--warning)}',
   '.finding.clear{color:var(--success-ink);font-weight:500}',
   '.scope{margin:0;padding-top:var(--space-3)}',
-  '.scope.separated{border-top:1px solid var(--border)}',
   '.callout{display:flex;align-items:flex-start;gap:var(--space-3);margin:var(--space-4) 0;padding:var(--space-3) var(--space-4);border:1px solid var(--border);border-radius:var(--radius-md);font-size:14px}',
   '.callout p{margin:0}',
   '.callout.locked{background:var(--warning-soft);border-color:var(--warning-border);color:var(--warning-ink)}',
