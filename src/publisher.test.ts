@@ -188,6 +188,55 @@ describe('serial publisher', () => {
     await publisher.stop()
   })
 
+  it('marks a preparation failure failed when recording that result fails before X dispatch', async () => {
+    const imageBytes = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, 1])
+    const created = submitSubmission(db, {
+      text: 'image preparation failure',
+      scheduledAt: NOW,
+      imageBytes,
+      checks: { blocking: [] },
+      actor: ACTOR,
+      now: SETUP_NOW
+    })
+    if (!created.ok) throw new Error('submission failed')
+    const decided = decideEntry(db, {
+      entryId: created.entryId,
+      decision: 'approve',
+      actor: ADMIN,
+      now: SETUP_NOW
+    })
+    if (!decided.ok) throw new Error('approval failed')
+    const post = db.prepare('SELECT id FROM scheduled_posts WHERE entryId = ?')
+      .get(created.entryId) as { id: string }
+    db.prepare('DELETE FROM media WHERE sha256 = (SELECT imageSha256 FROM entries WHERE id = ?)')
+      .run(created.entryId)
+    db.exec(`
+      CREATE TRIGGER fail_missing_image_result
+      BEFORE INSERT ON publish_results
+      WHEN NEW.error = 'image missing'
+      BEGIN
+        SELECT RAISE(ABORT, 'cannot record missing image');
+      END
+    `)
+    let sends = 0
+    const { publisher, alerts } = harness(async () => {
+      sends += 1
+      return { result: { channel: 'x', ok: true }, needsLogin: false }
+    })
+
+    await publisher.start()
+    await publisher.tick()
+
+    expect(sends).toBe(0)
+    expect(status(post.id)).toBe('failed')
+    expect(alerts).toEqual([{
+      kind: 'failed',
+      postId: post.id,
+      detail: 'unexpected publisher failure'
+    }])
+    await publisher.stop()
+  })
+
   it('does not send when the boot probe is bad', async () => {
     const post = approve('future', NOW + 50)
     let sends = 0

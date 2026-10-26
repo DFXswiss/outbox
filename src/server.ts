@@ -421,12 +421,15 @@ export function createOutboxServer(deps: OutboxServerDeps): Server {
         fail(res, req, pathname, auth.status, 'auth-failed', 'Sign in required.')
         return
       }
+      const slot = nextSlotZurich(now())
       sendHtml(
         res,
         200,
         renderComposerPage({
           text: '',
-          ...nextSlotZurich(now()),
+          scheduledDate: slot.date,
+          scheduledHour: slot.hour,
+          scheduledMinute: slot.minute,
           charCount: 0,
           costHint: costHint('')
         })

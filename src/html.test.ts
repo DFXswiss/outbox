@@ -162,6 +162,10 @@ describe('post excerpts', () => {
     expect(truncatePostText('x'.repeat(121))).toBe(`${'x'.repeat(120)}…`)
   })
 
+  it('hard cuts when the only word boundary is at index zero', () => {
+    expect(truncatePostText(` ${'x'.repeat(130)}`)).toBe(` ${'x'.repeat(119)}…`)
+  })
+
   it('counts emoji as code points and escapes the rendered excerpt', () => {
     const text = `${'😀'.repeat(121)}<tail>`
     expect(truncatePostText(text)).toBe(`${'😀'.repeat(120)}…`)

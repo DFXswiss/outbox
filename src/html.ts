@@ -328,7 +328,7 @@ export function truncatePostText(text: string): string {
       break
     }
   }
-  const shortened = (boundary >= 0 ? excerpt.slice(0, boundary) : excerpt).join('').trimEnd()
+  const shortened = (boundary > 0 ? excerpt.slice(0, boundary) : excerpt).join('').trimEnd()
   return `${shortened}…`
 }
 

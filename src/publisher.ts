@@ -83,6 +83,7 @@ export function createPublisher(deps: PublisherDeps) {
         return
       }
 
+      let dispatchStarted = false
       try {
         let result: PublishResult | null = null
         let needsLogin = false
@@ -109,9 +110,13 @@ export function createPublisher(deps: PublisherDeps) {
 
         if (result === null) {
           try {
-            const published = imageBytes === null
-              ? await deps.x.postTweet(post.text, now() + budgetMs)
-              : await deps.x.postTweet(post.text, now() + budgetMs, imageBytes)
+            let published: Awaited<ReturnType<PublisherDeps['x']['postTweet']>>
+            dispatchStarted = true
+            if (imageBytes === null) {
+              published = await deps.x.postTweet(post.text, now() + budgetMs)
+            } else {
+              published = await deps.x.postTweet(post.text, now() + budgetMs, imageBytes)
+            }
             result = published.result
             needsLogin = published.needsLogin
           } catch {
@@ -162,19 +167,19 @@ export function createPublisher(deps: PublisherDeps) {
             result: {
               channel: 'x',
               ok: false,
-              uncertain: true,
+              uncertain: dispatchStarted,
               error: detail
             },
             now: now()
           })
           deps.alert({
-            kind: 'uncertain',
+            kind: dispatchStarted ? 'uncertain' : 'failed',
             postId: post.postId,
             detail: finished.ok ? detail : 'could not record publish outcome'
           })
         } catch {
           deps.alert({
-            kind: 'uncertain',
+            kind: dispatchStarted ? 'uncertain' : 'failed',
             postId: post.postId,
             detail: 'could not record publish outcome'
           })

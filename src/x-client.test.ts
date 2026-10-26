@@ -406,8 +406,8 @@ describe('X publisher client', () => {
     expect({ tweets, tokens }).toEqual({ tweets: 1, tokens: 1 })
   })
 
-  it('does not refresh again when a tweet returns 401 after the upload used the refresh', async () => {
-    let uploads = 0
+  it('refreshes once after a STATUS 401 and does not refresh again after a tweet 401', async () => {
+    let statusChecks = 0
     let tweets = 0
     let refreshes = 0
     const x = client(async (input) => {
@@ -417,10 +417,13 @@ describe('X publisher client', () => {
         return json({ access_token: 'refreshed-access-token', expires_in: 7200 })
       }
       if (url.endsWith('/2/media/upload')) {
-        uploads += 1
-        return uploads === 1
+        return json({ data: { id: 'media-123', processing_info: { state: 'pending', check_after_secs: 0 } } })
+      }
+      if (url.includes('/2/media/upload?command=STATUS')) {
+        statusChecks += 1
+        return statusChecks === 1
           ? json({ title: 'expired' }, 401)
-          : json({ data: { id: 'media-123' } })
+          : json({ data: { processing_info: { state: 'succeeded' } } })
       }
       tweets += 1
       return json({ title: 'unauthorized' }, 401)
@@ -435,7 +438,7 @@ describe('X publisher client', () => {
     expect(response.result).toMatchObject({ ok: false, error: 'HTTP 401: unauthorized' })
     expect(response.result.uncertain).toBeUndefined()
     expect(response.needsLogin).toBe(true)
-    expect({ refreshes, uploads, tweets }).toEqual({ refreshes: 1, uploads: 2, tweets: 1 })
+    expect({ refreshes, statusChecks, tweets }).toEqual({ refreshes: 1, statusChecks: 2, tweets: 1 })
   })
 
   it('redacts the client secret and Basic credential value from refresh errors', async () => {

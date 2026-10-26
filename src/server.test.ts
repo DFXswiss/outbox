@@ -216,6 +216,18 @@ function auditReasons(db: SqliteDatabase): string[] {
   }>).map((row) => row.reason ?? '')
 }
 
+describe('GET / composer', () => {
+  it('preselects the next Zurich date, hour, and minute', async () => {
+    const h = await start()
+    const response = await call(h.port, '/', { token: TOKEN_A })
+
+    expect(response.status).toBe(200)
+    expect(response.text).toContain('id="scheduledDate" name="scheduledDate" type="date" required value="2023-01-01"')
+    expect(response.text.match(/<option value="01" selected>01<\/option>/g)).toHaveLength(1)
+    expect(response.text.match(/<option value="10" selected>10<\/option>/g)).toHaveLength(1)
+  })
+})
+
 describe('POST /api/submit', () => {
   it('rejects seconds that are not zero and accepts a five-minute datetime with zero seconds', async () => {
     const h = await start()
@@ -252,22 +264,32 @@ describe('POST /api/submit', () => {
     expect(entryCount(h.db)).toBe(0)
   })
 
-  it('accepts a multipart PNG and deduplicates the stored image', async () => {
+  it('deduplicates identical images across submissions and stores a different image separately', async () => {
     const h = await start()
     const bytes = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10, 1])
-    const form = new FormData()
-    form.set('text', CLEAN)
-    form.set('scheduledDate', '2024-07-15')
-    form.set('scheduledHour', '12')
-    form.set('scheduledMinute', '05')
-    form.set('image', new Blob([bytes], { type: 'application/octet-stream' }), 'chosen.bin')
-    const response = await call(h.port, '/api/submit', {
-      method: 'POST', token: TOKEN_A, headers: { accept: 'application/json' }, body: form
-    })
-    expect(response.status).toBe(200)
-    const body = response.json as { bundleId: string; entryId: string }
-    const entry = h.db.prepare('SELECT imageSha256 FROM entries WHERE id = ?').get(body.entryId) as { imageSha256: string }
-    expect(h.db.prepare('SELECT mime, bytes FROM media WHERE sha256 = ?').get(entry.imageSha256)).toMatchObject({ mime: 'image/png' })
+    const submitImage = async (minute: string, image: Uint8Array) => {
+      const form = new FormData()
+      form.set('text', CLEAN)
+      form.set('scheduledDate', '2024-07-15')
+      form.set('scheduledHour', '12')
+      form.set('scheduledMinute', minute)
+      form.set('image', new Blob([image], { type: 'application/octet-stream' }), 'chosen.bin')
+      const response = await call(h.port, '/api/submit', {
+        method: 'POST', token: TOKEN_A, headers: { accept: 'application/json' }, body: form
+      })
+      expect(response.status).toBe(200)
+      const body = response.json as { entryId: string }
+      return (h.db.prepare('SELECT imageSha256 FROM entries WHERE id = ?').get(body.entryId) as { imageSha256: string }).imageSha256
+    }
+    const firstSha = await submitImage('05', bytes)
+    const duplicateSha = await submitImage('10', bytes)
+    const otherSha = await submitImage('15', new Uint8Array([...bytes, 2]))
+
+    expect(firstSha).toBe(imageSha256(bytes))
+    expect(duplicateSha).toBe(firstSha)
+    expect(otherSha).not.toBe(firstSha)
+    expect(h.db.prepare('SELECT COUNT(*) AS n FROM media').get()).toEqual({ n: 2 })
+    expect(h.db.prepare('SELECT mime FROM media WHERE sha256 = ?').get(firstSha)).toEqual({ mime: 'image/png' })
   })
 
   it('rejects multipart text fields larger than the body limit', async () => {
