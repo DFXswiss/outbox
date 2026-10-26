@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url'
 import { afterEach, describe, expect, it } from 'vitest'
 import { openDatabase, type SqliteDatabase } from './db'
 import { submitSubmission } from './entries'
-import { REVIEW_SCOPE } from './findings'
+import { imageSha256 } from './content-hash'
 import type { Identity, Introspect } from './identity'
 import {
   createOutboxServer,
@@ -216,18 +216,124 @@ function auditReasons(db: SqliteDatabase): string[] {
   }>).map((row) => row.reason ?? '')
 }
 
-/** Independent clauses — a single word in the caption cannot satisfy this. */
-function expectReviewScopeMeaning(text: string): void {
-  expect(text).toMatch(
-    /Checked:[\s\S]*forbidden[\s\S]*MiCAR[\s\S]*provisional[\s\S]*listed[\s\S]*emoji[\s\S]*sentence[\s\S]*character/i
-  )
-  expect(text).toMatch(
-    /Not checked:[\s\S]*numbers[\s\S]*names[\s\S]*claims[\s\S]*factually true[\s\S]*author/i
-  )
-  expect(text).not.toMatch(/Not checked:[\s\S]*forbidden/i)
-}
-
 describe('POST /api/submit', () => {
+  it('rejects seconds that are not zero and accepts a five-minute datetime with zero seconds', async () => {
+    const h = await start()
+    const withSeconds = await submitJson(h.port, TOKEN_A, {
+      text: CLEAN,
+      scheduledAt: '2024-07-15T12:05:30'
+    })
+    expect(withSeconds.status).toBe(400)
+    expect(withSeconds.json).toMatchObject({
+      reason: 'invalid-request',
+      detail: 'Scheduled time must be on a 5-minute step.'
+    })
+
+    const zeroSeconds = await submitJson(h.port, TOKEN_A, {
+      text: CLEAN,
+      scheduledAt: '2024-07-15T12:05:00'
+    })
+    expect(zeroSeconds.status).toBe(200)
+    expect(zeroSeconds.json).toMatchObject({ ok: true })
+  })
+
+  it('requires 5-minute steps for datetime and date/hour/minute inputs', async () => {
+    const h = await start()
+    const json = await submitJson(h.port, TOKEN_A, { text: CLEAN, scheduledAt: '2024-07-15T12:01' })
+    expect(json.status).toBe(400)
+    expect(json.json).toMatchObject({ reason: 'invalid-request', detail: 'Scheduled time must be on a 5-minute step.' })
+    const form = await call(h.port, '/api/submit', {
+      method: 'POST', token: TOKEN_A,
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ text: CLEAN, scheduledDate: '2024-07-15', scheduledHour: '12', scheduledMinute: '01' }).toString()
+    })
+    expect(form.status).toBe(400)
+    expect(form.text).toContain('Scheduled time must be on a 5-minute step.')
+    expect(entryCount(h.db)).toBe(0)
+  })
+
+  it('accepts a multipart PNG and deduplicates the stored image', async () => {
+    const h = await start()
+    const bytes = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10, 1])
+    const form = new FormData()
+    form.set('text', CLEAN)
+    form.set('scheduledDate', '2024-07-15')
+    form.set('scheduledHour', '12')
+    form.set('scheduledMinute', '05')
+    form.set('image', new Blob([bytes], { type: 'application/octet-stream' }), 'chosen.bin')
+    const response = await call(h.port, '/api/submit', {
+      method: 'POST', token: TOKEN_A, headers: { accept: 'application/json' }, body: form
+    })
+    expect(response.status).toBe(200)
+    const body = response.json as { bundleId: string; entryId: string }
+    const entry = h.db.prepare('SELECT imageSha256 FROM entries WHERE id = ?').get(body.entryId) as { imageSha256: string }
+    expect(h.db.prepare('SELECT mime, bytes FROM media WHERE sha256 = ?').get(entry.imageSha256)).toMatchObject({ mime: 'image/png' })
+  })
+
+  it('accepts JPEG bytes and treats an empty file input as no image', async () => {
+    const h = await start()
+    const submitForm = async (image: Blob, filename: string) => {
+      const form = new FormData()
+      form.set('text', CLEAN)
+      form.set('scheduledDate', '2024-07-15')
+      form.set('scheduledHour', '12')
+      form.set('scheduledMinute', '10')
+      form.set('image', image, filename)
+      return call(h.port, '/api/submit', { method: 'POST', token: TOKEN_A, headers: { accept: 'application/json' }, body: form })
+    }
+    const jpegBytes = new Uint8Array([0xff, 0xd8, 0xff, 1])
+    const jpeg = await submitForm(new Blob([jpegBytes], { type: 'image/png' }), 'reported-png.png')
+    expect(jpeg.status).toBe(200)
+    const jpegBody = jpeg.json as { entryId: string }
+    const jpegEntry = h.db.prepare('SELECT imageSha256 FROM entries WHERE id = ?').get(jpegBody.entryId) as { imageSha256: string }
+    expect(h.db.prepare('SELECT mime FROM media WHERE sha256 = ?').get(jpegEntry.imageSha256)).toEqual({ mime: 'image/jpeg' })
+
+    const empty = await submitForm(new Blob([], { type: 'image/png' }), 'empty.png')
+    expect(empty.status).toBe(200)
+    const emptyBody = empty.json as { entryId: string }
+    expect(h.db.prepare('SELECT imageSha256 FROM entries WHERE id = ?').get(emptyBody.entryId)).toEqual({ imageSha256: null })
+  })
+
+  it('rejects a non-PNG/JPEG signature', async () => {
+    const h = await start()
+    const invalid = new FormData()
+    invalid.set('text', CLEAN)
+    invalid.set('scheduledDate', '2024-07-15')
+    invalid.set('scheduledHour', '12')
+    invalid.set('scheduledMinute', '05')
+    invalid.set('image', new Blob(['not an image'], { type: 'image/png' }), 'fake.png')
+    const bad = await call(h.port, '/api/submit', { method: 'POST', token: TOKEN_A, headers: { accept: 'application/json' }, body: invalid })
+    expect(bad.status).toBe(409)
+    expect(bad.json).toMatchObject({ reason: 'bad-image', detail: 'Image must be a PNG or JPEG up to 5 MB.' })
+
+    expect(entryCount(h.db)).toBe(0)
+  })
+
+  it('enforces the image size limit for correctly signed PNG files', async () => {
+    const h = await start()
+    const submitPng = async (size: number) => {
+      const bytes = new Uint8Array(size)
+      bytes.set([137, 80, 78, 71, 13, 10, 26, 10])
+      const form = new FormData()
+      form.set('text', CLEAN)
+      form.set('scheduledDate', '2024-07-15')
+      form.set('scheduledHour', '12')
+      form.set('scheduledMinute', '05')
+      form.set('image', new Blob([bytes], { type: 'image/png' }), 'image.png')
+      return call(h.port, '/api/submit', {
+        method: 'POST', token: TOKEN_A,
+        headers: { accept: 'application/json' }, body: form
+      })
+    }
+
+    const tooLarge = await submitPng(5 * 1024 * 1024 + 1)
+    expect(tooLarge.status).toBe(409)
+    expect(tooLarge.json).toMatchObject({ reason: 'bad-image' })
+    const atLimit = await submitPng(5 * 1024 * 1024)
+    expect(atLimit.status).toBe(200)
+    expect(entryCount(h.db)).toBe(1)
+  })
+
   it('rejects a JSON field that is not a string and writes no entry', async () => {
     const h = await start()
     const res = await call(h.port, '/api/submit', {
@@ -275,17 +381,23 @@ describe('POST /api/submit', () => {
 
   it('does not present a missing pack as an empty review result', async () => {
     const h = await start({ pack: false })
+    const form = new FormData()
+    form.set('text', CLEAN)
+    form.set('scheduledAt', FUTURE_LOCAL)
+    form.set('image', new Blob([new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10])], { type: 'image/png' }), 'image.png')
     const res = await call(h.port, '/api/submit', {
       method: 'POST',
       token: TOKEN_A,
-      headers: { 'content-type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({ text: CLEAN, scheduledAt: FUTURE_LOCAL }).toString()
+      headers: { accept: 'text/html' },
+      body: form
     })
     expect(res.status).toBe(409)
     expect(res.text).toContain('No usable review check is recorded.')
     expect(res.text).not.toContain('No blocking findings and no hints.')
     expect(res.text).toContain('Review pack is missing.')
-    expectReviewScopeMeaning(res.text)
+    expect(res.text).not.toContain('Checked:')
+    expect(res.text).not.toContain('Not checked:')
+    expect(res.text).toContain('Choose the image again — it was not kept.')
     expect(entryCount(h.db)).toBe(0)
   })
 
@@ -312,7 +424,8 @@ describe('POST /api/submit', () => {
     const page = await call(h.port, `/review/${created.bundleId}`, { token: TOKEN_A })
     expect(page.status).toBe(200)
     expect(page.text).toContain(CLEAN)
-    expectReviewScopeMeaning(page.text)
+    expect(page.text).not.toContain('Checked:')
+    expect(page.text).not.toContain('Not checked:')
     expect(page.text).toContain('Europe/Zurich')
     expect(page.text).not.toContain(TOKEN_A)
   })
@@ -334,7 +447,8 @@ describe('GET /review/:id', () => {
     expect(page.status).toBe(200)
     expect(page.text).toContain('No usable review check is recorded.')
     expect(page.text).not.toContain('No blocking findings and no hints.')
-    expectReviewScopeMeaning(page.text)
+    expect(page.text).not.toContain('Checked:')
+    expect(page.text).not.toContain('Not checked:')
     expect(page.text).toContain(
       'No review check is recorded, so this entry cannot be approved.'
     )
@@ -534,7 +648,8 @@ describe('no publish-now', () => {
     const home = await call(h.port, '/', { token: TOKEN_A })
     expect(home.status).toBe(200)
     expect(home.text).toContain('Submit for approval')
-    expectReviewScopeMeaning(home.text)
+    expect(home.text).not.toContain('Checked:')
+    expect(home.text).not.toContain('Not checked:')
     expect(home.text).not.toContain('Publish now')
     expect(home.text).not.toContain('/api/publish')
     expect(home.text).not.toContain('/api/schedule')
@@ -1100,6 +1215,59 @@ describe('GET /api/me', () => {
   })
 })
 
+describe('GET /posts', () => {
+  it('shows only the author’s posts to OUTBOX and every post to ADMIN', async () => {
+    const h = await start()
+    const own = submitSubmission(h.db, { text: 'own author post', scheduledAt: SUMMER_EPOCH, checks: { blocking: [] }, actor: { user: 'user-a', account: 'account-a' }, now: NOW })
+    const other = submitSubmission(h.db, { text: 'other author post', scheduledAt: SUMMER_EPOCH + 300_000, checks: { blocking: [] }, actor: { user: 'user-b', account: 'account-b' }, now: NOW })
+    expect(own.ok && other.ok).toBe(true)
+    const author = await call(h.port, '/posts', { token: TOKEN_A })
+    expect(author.status).toBe(200)
+    expect(author.text).toContain('own author post')
+    expect(author.text).not.toContain('other author post')
+    expect(author.text).toContain('Waiting for approval.')
+    expect(author.text).toContain('aria-current="page">Posts')
+    const admin = await call(h.port, '/posts', { token: TOKEN_ADMIN })
+    expect(admin.text).toContain('own author post')
+    expect(admin.text).toContain('other author post')
+    expect(admin.text.indexOf('other author post')).toBeLessThan(admin.text.indexOf('own author post'))
+    const api = await call(h.port, '/api/posts', { token: TOKEN_ADMIN })
+    const posts = (api.json as { posts: Array<{ text: string; scheduledAt: number }> }).posts
+    expect(posts.map((post) => post.text)).toEqual(['own author post', 'other author post'])
+    expect(posts.map((post) => post.scheduledAt)).toEqual([SUMMER_EPOCH, SUMMER_EPOCH + 300_000])
+  })
+
+  it('shows the correct empty state for authors and approvers', async () => {
+    const h = await start()
+    const author = await call(h.port, '/posts', { token: TOKEN_A })
+    const admin = await call(h.port, '/posts', { token: TOKEN_ADMIN })
+    expect(author.text).toContain('No posts yet.')
+    expect(author.text).toContain('Write a post')
+    expect(admin.text).toContain('No posts yet.')
+    expect(admin.text).not.toContain('Write a post')
+  })
+})
+
+describe('GET /media/:sha256', () => {
+  it('serves image bytes only to an identity that can see a referencing entry', async () => {
+    const h = await start()
+    const bytes = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, 1])
+    const created = submitSubmission(h.db, { text: CLEAN, scheduledAt: SUMMER_EPOCH, imageBytes: bytes, checks: { blocking: [] }, actor: { user: 'user-a', account: 'account-a' }, now: NOW })
+    if (!created.ok) throw new Error('expected submission')
+    const sha = imageSha256(bytes)
+    const author = await fetch(`http://127.0.0.1:${h.port}/media/${sha}`, { headers: { authorization: `Bearer ${TOKEN_A}` } })
+    expect(author.status).toBe(200)
+    expect(Buffer.from(await author.arrayBuffer()).equals(bytes)).toBe(true)
+    expect(author.headers.get('content-type')).toBe('image/png')
+    expect(author.headers.get('x-content-type-options')).toBe('nosniff')
+    expect(author.headers.get('cache-control')).toBe('private, no-store')
+    const other = await call(h.port, `/media/${sha}`, { token: TOKEN_B })
+    const unknown = await call(h.port, `/media/${'0'.repeat(64)}`, { token: TOKEN_A })
+    expect(other.status).toBe(404)
+    expect(unknown.status).toBe(404)
+  })
+})
+
 describe('POST /api/review', () => {
   it('returns findings and writes no entry', async () => {
     const h = await start()
@@ -1113,9 +1281,28 @@ describe('POST /api/review', () => {
     expect(res.json).toEqual({
       ok: true,
       blocking: ['Forbidden claim: trustless'],
-      hints: []
+      hints: [],
+      charCount: [...BLOCKING].length,
+      costHint: 'X pay-per-use: 0.015 USD per post, 0.200 USD if the post contains a URL.'
     })
     expect(entryCount(h.db)).toBe(0)
+  })
+
+  it('returns the empty draft counters and no findings for the blank composer state', async () => {
+    const h = await start()
+    const res = await call(h.port, '/api/review', {
+      method: 'POST', token: TOKEN_A,
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ text: '' })
+    })
+    expect(res.status).toBe(200)
+    expect(res.json).toMatchObject({
+      ok: true,
+      blocking: [],
+      hints: [],
+      charCount: 0,
+      costHint: 'X pay-per-use: 0.015 USD per post, 0.200 USD if the post contains a URL.'
+    })
   })
 })
 
@@ -1130,9 +1317,12 @@ describe('unreadable cookie', () => {
   })
 })
 
-describe('review scope caption', () => {
-  it('names the listed provisional check and withholds factual truth of numbers, names and claims', () => {
-    expectReviewScopeMeaning(REVIEW_SCOPE)
+describe('review check presentation', () => {
+  it('does not show a Checked scope line on the composer', async () => {
+    const h = await start()
+    const page = await call(h.port, '/', { token: TOKEN_A })
+    expect(page.text).toContain('Checks appear here as you type.')
+    expect(page.text).not.toContain('Checked:')
   })
 })
 
@@ -1164,5 +1354,18 @@ describe('font assets', () => {
     expect(response.status).toBe(200)
     expect(response.text).toContain('@font-face')
     expect(response.text).toContain('/assets/fonts/Inter-Regular.woff2')
+  })
+})
+
+describe('composer script and CSP', () => {
+  it('serves only the composer script asset and permits it through the exact CSP', async () => {
+    const h = await start()
+    const page = await call(h.port, '/', { token: TOKEN_A })
+    expect(page.headers.get('content-security-policy')).toBe("default-src 'none'; script-src 'self'; connect-src 'self'; img-src 'self' blob:; style-src 'unsafe-inline'; font-src 'self'; form-action 'self'; base-uri 'none'")
+    const script = await fetch(`http://127.0.0.1:${h.port}/assets/composer.js`)
+    expect(script.status).toBe(200)
+    expect(script.headers.get('content-type')).toBe('text/javascript; charset=utf-8')
+    expect(await script.text()).toBe(readFileSync(join(dirname(FONT_DIRECTORY), 'composer.js'), 'utf8'))
+    expect((await fetch(`http://127.0.0.1:${h.port}/assets/private.js`)).status).toBe(404)
   })
 })

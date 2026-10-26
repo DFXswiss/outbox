@@ -56,7 +56,8 @@ function approve(text: string, scheduledAt: number) {
 function harness(
   postTweet: (
     text: string,
-    deadline: number
+    deadline: number,
+    imageBytes?: Buffer | Uint8Array | null
   ) => Promise<{ result: PublishResult; needsLogin: boolean }>,
   probe: () => Promise<'ok' | 'bad'> = async () => 'ok'
 ) {
@@ -214,11 +215,12 @@ describe('serial publisher', () => {
     await publisher.stop()
   })
 
-  it('fails image posts without contacting X', async () => {
+  it('publishes an image post after verifying its stored bytes', async () => {
+    const image = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, 1])
     const created = submitSubmission(db, {
       text: 'image copy',
       scheduledAt: NOW,
-      imageBytes: Buffer.from('test image'),
+      imageBytes: image,
       checks: { blocking: [] },
       actor: ACTOR,
       now: SETUP_NOW
@@ -230,8 +232,7 @@ describe('serial publisher', () => {
       entryId: created.entryId,
       decision: 'approve',
       actor: ADMIN,
-      now: SETUP_NOW,
-      imageBytes: Buffer.from('test image')
+      now: SETUP_NOW
     })
     if (!decided.ok) {
       throw new Error('approval failed')
@@ -240,6 +241,27 @@ describe('serial publisher', () => {
       'SELECT id FROM scheduled_posts WHERE entryId = ?'
     ).get(created.entryId) as { id: string }
     let sends = 0
+    const { publisher } = harness(async (_text, _deadline, uploaded) => {
+      sends += 1
+      expect(Buffer.from(uploaded!).equals(image)).toBe(true)
+      return { result: { channel: 'x', ok: true }, needsLogin: false }
+    })
+    await publisher.start()
+    await publisher.tick()
+    expect(sends).toBe(1)
+    expect(status(post.id)).toBe('sent')
+    await publisher.stop()
+  })
+
+  it('marks a missing media row failed without calling X', async () => {
+    const image = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, 1])
+    const created = submitSubmission(db, { text: 'image copy', scheduledAt: NOW, imageBytes: image, checks: { blocking: [] }, actor: ACTOR, now: SETUP_NOW })
+    if (!created.ok) throw new Error('submission failed')
+    const approved = decideEntry(db, { entryId: created.entryId, decision: 'approve', actor: ADMIN, now: SETUP_NOW })
+    if (!approved.ok) throw new Error('approval failed')
+    const row = db.prepare('SELECT p.id, e.imageSha256 FROM scheduled_posts p JOIN entries e ON e.id = p.entryId WHERE p.entryId = ?').get(created.entryId) as { id: string; imageSha256: string }
+    db.prepare('DELETE FROM media WHERE sha256 = ?').run(row.imageSha256)
+    let sends = 0
     const { publisher } = harness(async () => {
       sends += 1
       return { result: { channel: 'x', ok: true }, needsLogin: false }
@@ -247,7 +269,7 @@ describe('serial publisher', () => {
     await publisher.start()
     await publisher.tick()
     expect(sends).toBe(0)
-    expect(status(post.id)).toBe('failed')
+    expect(status(row.id)).toBe('failed')
     await publisher.stop()
   })
 

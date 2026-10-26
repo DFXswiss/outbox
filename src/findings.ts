@@ -11,14 +11,6 @@ import type { EntryChecks } from './entries'
 
 const X_CHAR_LIMIT = 280
 
-/**
- * Shown next to findings so a green result is not read as a content
- * approval. Provisional parameters from the pack are checked; whether
- * numbers, names, and claims are factually true is not.
- */
-export const REVIEW_SCOPE =
-  'Checked: forbidden phrasing, MiCAR wording, a qualifier on provisional parameters listed in the rules, emoji count, sentence length, and character count. Not checked: whether numbers, names, and claims in the text are factually true — the author stands for those.'
-
 export function loadPackRules(packRoot: string, brand: string): TopicRules | null {
   try {
     return loadTopicRules(packRoot, brand)
@@ -31,6 +23,7 @@ export type ReviewRun =
   | { ok: false; reason: 'missing-pack' }
   | { ok: true; checks: EntryChecks }
 
+/** Checks deterministic wording rules and hints; factual truth is outside this review. */
 export function reviewText(packRoot: string, brand: string, text: string): ReviewRun {
   const rules = loadPackRules(packRoot, brand)
   if (rules === null) return { ok: false, reason: 'missing-pack' }

@@ -68,6 +68,13 @@ CREATE TABLE IF NOT EXISTS audit (
   actorAccount TEXT NOT NULL,
   reason TEXT
 );
+
+CREATE TABLE IF NOT EXISTS media (
+  sha256 TEXT PRIMARY KEY,
+  mime TEXT NOT NULL,
+  bytes BLOB NOT NULL,
+  createdAt INTEGER NOT NULL
+);
 `
 
 /**

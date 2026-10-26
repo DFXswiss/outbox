@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto'
 import type { SqliteDatabase } from './db'
+import { IMAGE_LIMIT, imageMime } from './image'
 import type { PublishResult } from './status'
 
 type Credentials = {
@@ -303,7 +304,8 @@ export function createXClient(options: XClientOptions) {
 
   async function postTweet(
     text: string,
-    deadlineMs: number
+    deadlineMs: number,
+    imageBytes?: Buffer | Uint8Array | null
   ): Promise<{ result: PublishResult; needsLogin: boolean }> {
     let token: string
     try {
@@ -312,6 +314,91 @@ export function createXClient(options: XClientOptions) {
       return {
         result: { channel: 'x', ok: false, error: safeError(error) },
         needsLogin: true
+      }
+    }
+
+    let refreshUsed = false
+    const refreshAfter401 = async (): Promise<{ ok: true } | { ok: false; error: unknown }> => {
+      if (refreshUsed) return { ok: false, error: new Error('Refresh already used') }
+      refreshUsed = true
+      try {
+        token = await refresh(deadlineMs)
+        return { ok: true }
+      } catch (error) {
+        return { ok: false, error }
+      }
+    }
+
+    let mediaId: string | undefined
+    if (imageBytes && imageBytes.byteLength > 0) {
+      const bytes = Buffer.from(imageBytes)
+      const mime = imageMime(bytes)
+      if (bytes.byteLength > IMAGE_LIMIT || mime === null) {
+        return { result: { channel: 'x', ok: false, error: 'Image must be a PNG or JPEG up to 5 MB.' }, needsLogin: false }
+      }
+      const upload = async (): Promise<Response> => {
+        const form = new FormData()
+        const blobBytes = new Uint8Array(bytes.byteLength)
+        blobBytes.set(bytes)
+        form.append('media', new Blob([blobBytes], { type: mime }), mime === 'image/png' ? 'image.png' : 'image.jpg')
+        form.append('media_category', 'tweet_image')
+        return request(
+          `${root}/2/media/upload`,
+          { method: 'POST', headers: { authorization: `Bearer ${token}` }, body: form },
+          deadlineMs
+        )
+      }
+      try {
+        let response = await upload()
+        if (response.status === 401) {
+          const refreshed = await refreshAfter401()
+          if (!refreshed.ok) {
+            return { result: { channel: 'x', ok: false, error: safeError(refreshed.error) }, needsLogin: true }
+          }
+          response = await upload()
+        }
+        let body: unknown
+        try { body = await response.json() } catch { body = null }
+        if (!response.ok) {
+          return { result: { channel: 'x', ok: false, error: errorDetail(response.status, body, credentialSecrets(token, loadCredentials(options.db)?.refreshToken ?? '', options.clientId, options.clientSecret)) }, needsLogin: response.status === 401 }
+        }
+        const data = body && typeof body === 'object' ? (body as Record<string, unknown>).data : null
+        mediaId = data && typeof data === 'object' && typeof (data as Record<string, unknown>).id === 'string'
+          ? (data as Record<string, unknown>).id as string : undefined
+        if (!mediaId) return { result: { channel: 'x', ok: false, error: 'Invalid X media upload response.' }, needsLogin: false }
+        let processing = data && typeof data === 'object' ? (data as Record<string, unknown>).processing_info : null
+        if (processing != null && (typeof processing !== 'object' || Array.isArray(processing))) {
+          return { result: { channel: 'x', ok: false, error: 'Invalid X media processing response.' }, needsLogin: false }
+        }
+        while (processing && typeof processing === 'object') {
+          const info = processing as Record<string, unknown>
+          const state = info.state
+          if (state === 'succeeded') break
+          if (state === 'failed') return { result: { channel: 'x', ok: false, error: 'X media processing failed.' }, needsLogin: false }
+          if (state !== 'pending' && state !== 'in_progress') return { result: { channel: 'x', ok: false, error: 'Invalid X media processing state.' }, needsLogin: false }
+          const waitMs = Math.max(0, typeof info.check_after_secs === 'number' ? info.check_after_secs * 1000 : 1000)
+          if (now() + waitMs >= deadlineMs) return { result: { channel: 'x', ok: false, error: 'Request deadline exceeded' }, needsLogin: false }
+          await new Promise((resolve) => setTimeout(resolve, waitMs))
+          const statusRequest = async (): Promise<Response> => request(
+            `${root}/2/media/upload?command=STATUS&media_id=${encodeURIComponent(mediaId!)}`,
+            { headers: { authorization: `Bearer ${token}` } }, deadlineMs
+          )
+          let statusResponse = await statusRequest()
+          if (statusResponse.status === 401) {
+            const refreshed = await refreshAfter401()
+            if (!refreshed.ok) return { result: { channel: 'x', ok: false, error: safeError(refreshed.error) }, needsLogin: true }
+            statusResponse = await statusRequest()
+          }
+          let statusBody: unknown
+          try { statusBody = await statusResponse.json() } catch { statusBody = null }
+          if (!statusResponse.ok) return { result: { channel: 'x', ok: false, error: errorDetail(statusResponse.status, statusBody, credentialSecrets(token, loadCredentials(options.db)?.refreshToken ?? '', options.clientId, options.clientSecret)) }, needsLogin: statusResponse.status === 401 }
+          const statusData = statusBody && typeof statusBody === 'object' ? (statusBody as Record<string, unknown>).data : null
+          processing = statusData && typeof statusData === 'object' ? (statusData as Record<string, unknown>).processing_info : null
+          if (!processing) return { result: { channel: 'x', ok: false, error: 'Invalid X media status response.' }, needsLogin: false }
+          if (typeof processing !== 'object' || Array.isArray(processing)) return { result: { channel: 'x', ok: false, error: 'Invalid X media status response.' }, needsLogin: false }
+        }
+      } catch (error) {
+        return { result: { channel: 'x', ok: false, error: safeError(error) }, needsLogin: false }
       }
     }
 
@@ -328,7 +415,7 @@ export function createXClient(options: XClientOptions) {
             authorization: `Bearer ${accessToken}`,
             'content-type': 'application/json'
           },
-          body: JSON.stringify({ text })
+          body: JSON.stringify({ text, ...(mediaId ? { media: { media_ids: [mediaId] } } : {}) })
         },
         deadlineMs,
         () => {
@@ -351,16 +438,15 @@ export function createXClient(options: XClientOptions) {
       }
     }
 
-    if (response.status === 401) {
-      try {
-        token = await refresh(deadlineMs)
-      } catch (error) {
+    if (response.status === 401 && !refreshUsed) {
+      const refreshed = await refreshAfter401()
+      if (!refreshed.ok) {
         return {
           result: {
             channel: 'x',
             ok: false,
             uncertain: true,
-            error: safeError(error)
+            error: safeError(refreshed.error)
           },
           needsLogin: true
         }

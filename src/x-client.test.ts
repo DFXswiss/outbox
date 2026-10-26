@@ -54,6 +54,106 @@ describe('X publisher client', () => {
     })
   })
 
+  it('uploads a PNG before sending a tweet with its media id', async () => {
+    const requests: string[] = []
+    let tweetBody: unknown
+    const image = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, 1])
+    const x = client(async (input, init) => {
+      const url = String(input)
+      requests.push(url)
+      if (url.endsWith('/2/media/upload')) {
+        expect(init?.body).toBeInstanceOf(FormData)
+        const form = init!.body as FormData
+        expect(form.get('media_category')).toBe('tweet_image')
+        expect((form.get('media') as File).type).toBe('image/png')
+        return json({ data: { id: 'media-123' } })
+      }
+      tweetBody = JSON.parse(String(init?.body))
+      return json({ data: { id: '123' } }, 201)
+    })
+    const result = await x.postTweet('hello', NOW + 20_000, image)
+    expect(requests.map((url) => url.slice(url.lastIndexOf('/2/')))).toEqual(['/2/media/upload', '/2/tweets'])
+    expect(tweetBody).toEqual({ text: 'hello', media: { media_ids: ['media-123'] } })
+    expect(result.result.ok).toBe(true)
+  })
+
+  it('fails an upload error without dispatching a tweet', async () => {
+    let tweets = 0
+    const x = client(async (input) => {
+      const url = String(input)
+      if (url.endsWith('/2/media/upload')) return json({ title: 'Unavailable' }, 500)
+      tweets += 1
+      return json({ data: { id: '123' } }, 201)
+    })
+    const result = await x.postTweet('hello', NOW + 20_000, Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))
+    expect(result.result).toMatchObject({ ok: false, error: 'HTTP 500: Unavailable' })
+    expect(result.result.uncertain).toBeUndefined()
+    expect(tweets).toBe(0)
+  })
+
+  it('refreshes once after upload 401 and sends only after the retry succeeds', async () => {
+    let uploads = 0
+    let refreshes = 0
+    let tweets = 0
+    const x = client(async (input) => {
+      const url = String(input)
+      if (url.endsWith('/2/oauth2/token')) {
+        refreshes += 1
+        return json({ access_token: 'new-access-token', refresh_token: 'new-refresh-token', expires_in: 7200 })
+      }
+      if (url.endsWith('/2/media/upload')) {
+        uploads += 1
+        return uploads === 1 ? json({ title: 'expired' }, 401) : json({ data: { id: 'media-2' } })
+      }
+      tweets += 1
+      return json({ data: { id: '123' } }, 201)
+    })
+    const result = await x.postTweet('hello', NOW + 20_000, Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))
+    expect(result.result.ok).toBe(true)
+    expect(uploads).toBe(2)
+    expect(refreshes).toBe(1)
+    expect(tweets).toBe(1)
+  })
+
+  it('does not refresh a second time if the tweet returns 401 after upload recovery', async () => {
+    let refreshes = 0
+    let uploads = 0
+    let tweets = 0
+    const x = client(async (input) => {
+      const url = String(input)
+      if (url.endsWith('/2/oauth2/token')) {
+        refreshes += 1
+        return json({ access_token: 'new-access-token', refresh_token: 'new-refresh-token', expires_in: 7200 })
+      }
+      if (url.endsWith('/2/media/upload')) {
+        uploads += 1
+        return uploads === 1 ? json({ title: 'expired' }, 401) : json({ data: { id: 'media-4' } })
+      }
+      tweets += 1
+      return json({ title: 'expired again' }, 401)
+    })
+    const result = await x.postTweet('hello', NOW + 20_000, Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))
+    expect(refreshes).toBe(1)
+    expect(tweets).toBe(1)
+    expect(result.result).toMatchObject({ ok: false, error: 'HTTP 401: expired again' })
+    expect(result.result.uncertain).toBeUndefined()
+    expect(result.needsLogin).toBe(true)
+  })
+
+  it('treats failed media processing as failed and never sends a tweet', async () => {
+    let tweets = 0
+    const x = client(async (input) => {
+      const url = String(input)
+      if (url.endsWith('/2/media/upload')) return json({ data: { id: 'media-3', processing_info: { state: 'failed' } } })
+      tweets += 1
+      return json({ data: { id: '123' } }, 201)
+    })
+    const result = await x.postTweet('hello', NOW + 20_000, Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))
+    expect(result.result).toMatchObject({ ok: false, error: 'X media processing failed.' })
+    expect(result.result.uncertain).toBeUndefined()
+    expect(tweets).toBe(0)
+  })
+
   it.each([400, 403, 429])('classifies HTTP %s as failed', async (status) => {
     const x = client(async () => json({
       title: 'Rejected',
@@ -304,6 +404,38 @@ describe('X publisher client', () => {
       needsLogin: true
     })
     expect({ tweets, tokens }).toEqual({ tweets: 1, tokens: 1 })
+  })
+
+  it('does not refresh again when a tweet returns 401 after the upload used the refresh', async () => {
+    let uploads = 0
+    let tweets = 0
+    let refreshes = 0
+    const x = client(async (input) => {
+      const url = String(input)
+      if (url.endsWith('/2/oauth2/token')) {
+        refreshes += 1
+        return json({ access_token: 'refreshed-access-token', expires_in: 7200 })
+      }
+      if (url.endsWith('/2/media/upload')) {
+        uploads += 1
+        return uploads === 1
+          ? json({ title: 'expired' }, 401)
+          : json({ data: { id: 'media-123' } })
+      }
+      tweets += 1
+      return json({ title: 'unauthorized' }, 401)
+    })
+
+    const response = await x.postTweet(
+      'hello',
+      NOW + 20_000,
+      Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])
+    )
+
+    expect(response.result).toMatchObject({ ok: false, error: 'HTTP 401: unauthorized' })
+    expect(response.result.uncertain).toBeUndefined()
+    expect(response.needsLogin).toBe(true)
+    expect({ refreshes, uploads, tweets }).toEqual({ refreshes: 1, uploads: 2, tweets: 1 })
   })
 
   it('redacts the client secret and Basic credential value from refresh errors', async () => {

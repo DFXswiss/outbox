@@ -39,7 +39,7 @@ describe('composer markup', () => {
     expect([...html.matchAll(new RegExp(`<span>${escaped}</span>`, 'g'))]).toHaveLength(2)
   })
 
-  it('keeps the original form contract, labels, preview details, and escaped content', () => {
+  it('renders the accessible 5-minute schedule, image field, preview and escaped content', () => {
     const html = renderComposerPage({
       text: '<script>alert("x")</script>',
       scheduledAt: '2024-07-15T12:00',
@@ -51,10 +51,15 @@ describe('composer markup', () => {
 
     expect(html).toContain('method="post" action="/api/submit"')
     expect(html).toContain('id="text" name="text"')
-    expect(html).toContain('id="scheduledAt" name="scheduledAt" type="datetime-local"')
+    expect(html).toContain('id="scheduledDate" name="scheduledDate" type="date"')
+    expect(html).toContain('id="scheduledHour" name="scheduledHour"')
+    expect(html).toContain('id="scheduledMinute" name="scheduledMinute"')
+    expect(html).toContain('enctype="multipart/form-data"')
+    expect(html).toContain('name="image" type="file"')
     expect(html).toContain('&lt;script&gt;alert(&quot;x&quot;)&lt;/script&gt;')
     expect(html).not.toContain('<script>alert')
-    expect(html).toContain('<span class="tabular">32</span> characters. Cost estimate &lt; 1 CHF')
+    expect(html).toContain('<span class="tabular" id="character-count">32</span> characters.')
+    expect(html).toContain('Cost estimate &lt; 1 CHF')
     expect(html).toContain('No usable review check is recorded.')
     expect(html).toContain('Review pack is missing.')
   })
@@ -74,7 +79,7 @@ describe('composer markup', () => {
     expect(html).toContain('aria-hidden="true"')
   })
 
-  it('omits the scope divider on a blank form and shows it after a finding', () => {
+  it('omits the checked scope and renders the empty-state hint', () => {
     const blank = renderComposerPage({
       text: '',
       scheduledAt: '',
@@ -89,14 +94,20 @@ describe('composer markup', () => {
       recorded: { blocking: ['A blocking finding.'], hints: [] }
     })
 
-    expect(blank).toContain('<p class="scope">')
-    expect(blank).not.toContain('<p class="scope separated">')
+    expect(blank).toContain('Checks appear here as you type.')
+    expect(blank).not.toContain('Checked:')
     expect(withFinding).toContain('A blocking finding.')
-    expect(withFinding).toContain('<p class="scope separated">')
+    expect(withFinding).not.toContain('Checked:')
   })
 })
 
 describe('review markup', () => {
+  it('omits the Checked scope line from review findings too', () => {
+    const html = review({ recorded: { blocking: [], hints: [] } })
+    expect(html).toContain('No blocking findings and no hints.')
+    expect(html).not.toContain('Checked:')
+  })
+
   it('escapes every dynamic review text field and encodes action path identifiers', () => {
     const value = "<x>&'"
     const escaped = '&lt;x&gt;&amp;&#39;'

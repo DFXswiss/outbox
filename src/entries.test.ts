@@ -85,6 +85,21 @@ describe('submitSubmission', () => {
     if (!created.ok) throw new Error('expected submit to succeed')
     expect(entryState(created.entryId)).toBe('submitted')
   })
+
+  it('stores attached bytes in media in the submission transaction', () => {
+    const bytes = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, 1])
+    const created = submit({ imageBytes: bytes })
+    if (!created.ok) throw new Error('expected submit to succeed')
+    const entry = db.prepare('SELECT imageSha256 FROM entries WHERE id = ?').get(created.entryId) as { imageSha256: string }
+    const stored = db.prepare('SELECT mime, bytes FROM media WHERE sha256 = ?').get(entry.imageSha256) as { mime: string; bytes: Buffer }
+    expect(stored.mime).toBe('image/png')
+    expect(stored.bytes.equals(bytes)).toBe(true)
+  })
+
+  it('rejects image bytes without a PNG or JPEG signature', () => {
+    expect(() => submit({ imageBytes: Buffer.from('not an image') })).toThrow('Image must be a PNG or JPEG up to 5 MB.')
+    expect((db.prepare('SELECT COUNT(*) AS n FROM bundles').get() as { n: number }).n).toBe(0)
+  })
 })
 
 describe('approve and the send queue', () => {
@@ -287,6 +302,22 @@ describe('stale content before the queue insert', () => {
     expect(result).toEqual({ ok: false, reason: 'stale-content' })
     expect(queueFor(created.entryId)).toEqual([])
     expect(entryState(created.entryId)).toBe('submitted')
+  })
+
+  it('approves image content using the stored bytes and refuses a missing media row', () => {
+    const bytes = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, 1])
+    const created = submit({ imageBytes: bytes })
+    if (!created.ok) throw new Error('expected submit to succeed')
+    expect(decideEntry(db, { entryId: created.entryId, decision: 'approve', actor: APPROVER, now: NOW }))
+      .toEqual({ ok: true, state: 'approved' })
+
+    const missing = submit({ imageBytes: bytes })
+    if (!missing.ok) throw new Error('expected submit to succeed')
+    const row = db.prepare('SELECT imageSha256 FROM entries WHERE id = ?').get(missing.entryId) as { imageSha256: string }
+    db.prepare('DELETE FROM media WHERE sha256 = ?').run(row.imageSha256)
+    const result = decideEntry(db, { entryId: missing.entryId, decision: 'approve', actor: APPROVER, now: NOW })
+    expect(result).toMatchObject({ ok: false, reason: 'not-approvable' })
+    expect(queueFor(missing.entryId)).toEqual([])
   })
 })
 

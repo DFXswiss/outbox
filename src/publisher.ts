@@ -15,7 +15,8 @@ export type PublisherDeps = {
     probe(): Promise<'ok' | 'bad'>
     postTweet(
       text: string,
-      deadlineMs: number
+      deadlineMs: number,
+      imageBytes?: Buffer | Uint8Array | null
     ): Promise<{ result: PublishResult; needsLogin: boolean }>
   }
   alert: AlertSink
@@ -85,11 +86,18 @@ export function createPublisher(deps: PublisherDeps) {
       try {
         let result: PublishResult
         let needsLogin = false
+        let imageBytes: Buffer | null = null
         if (post.imageSha256 !== null) {
-          result = {
-            channel: 'x',
-            ok: false,
-            error: 'image posts are not supported yet'
+          const stored = deps.db.prepare('SELECT bytes FROM media WHERE sha256 = ?').get(post.imageSha256) as { bytes: Buffer } | undefined
+          imageBytes = stored?.bytes ?? null
+          if (!imageBytes) {
+            result = { channel: 'x', ok: false, error: 'image missing' }
+          } else if (contentHash(post.text, post.scheduledAt, imageBytes) !== post.contentHash) {
+            result = { channel: 'x', ok: false, error: 'content changed after approval' }
+          } else {
+            const published = await deps.x.postTweet(post.text, now() + budgetMs, imageBytes)
+            result = published.result
+            needsLogin = published.needsLogin
           }
         } else if (
           contentHash(post.text, post.scheduledAt, null) !== post.contentHash

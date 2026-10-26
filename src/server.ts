@@ -19,14 +19,17 @@ import {
 } from './entries'
 import { characterCount, costHint, loadPackRules, reviewText } from './findings'
 import {
+  authorStatusMessage,
   renderComposerPage,
   renderPlainPage,
+  renderPostsPage,
   renderReviewPage
 } from './html'
 import { hasRoleAccess, type Identity, type Introspect, type Role } from './identity'
+import { IMAGE_LIMIT, imageMime } from './image'
 import { createLog } from './log'
 import { resolveUncertain, retryPost } from './queue'
-import { formatZurich, parseZurichDateTime } from './time'
+import { formatZurich, nextSlotZurich, parseZurichDateTime } from './time'
 
 export type OutboxServerDeps = {
   db: SqliteDatabase
@@ -44,6 +47,7 @@ export type OutboxServerDeps = {
 const COOKIE_NAME = 'outbox'
 const COOKIE_MAX_AGE_SEC = 12 * 60 * 60
 const BODY_LIMIT = 1_000_000
+const MULTIPART_LIMIT = 6 * 1024 * 1024
 const ResolveInputSchema = z.object({
   resolution: z.enum(['sent', 'failed']),
   url: z.string().optional()
@@ -51,7 +55,7 @@ const ResolveInputSchema = z.object({
 
 const SECURITY_HEADERS: Record<string, string> = {
   'content-security-policy':
-    "default-src 'none'; style-src 'unsafe-inline'; font-src 'self'; form-action 'self'; base-uri 'none'",
+    "default-src 'none'; script-src 'self'; connect-src 'self'; img-src 'self' blob:; style-src 'unsafe-inline'; font-src 'self'; form-action 'self'; base-uri 'none'",
   'referrer-policy': 'no-referrer',
   'x-content-type-options': 'nosniff',
   'x-robots-tag': 'noindex, nofollow',
@@ -71,9 +75,10 @@ type EntryView = {
   channel: string | null
   channelStatus: string | null
   postUrl: string | null
+  imageSha256: string | null
 }
 
-const ENTRY_VIEW_SQL = `SELECT e.id, e.bundleId, e.state, e.text, e.scheduledAt, e.checks,
+const ENTRY_VIEW_SQL = `SELECT e.id, e.bundleId, e.state, e.text, e.scheduledAt, e.checks, e.imageSha256,
        b.authoredByUser, b.authoredByAccount, p.id AS postId, p.channel,
        p.status AS channelStatus, p.url AS postUrl
 FROM entries e
@@ -94,6 +99,12 @@ function mediaType(req: IncomingMessage): string {
 function wantsJson(req: IncomingMessage, pathname: string): boolean {
   const type = mediaType(req)
   if (type === 'application/x-www-form-urlencoded') return false
+  if (type === 'multipart/form-data') {
+    const accept = headerString(req.headers.accept) ?? ''
+    if (accept.includes('text/html')) return false
+    if (accept.includes('application/json')) return true
+    return pathname.startsWith('/api/')
+  }
   if (type === 'application/json') return true
   if (pathname.startsWith('/api/')) return true
   const accept = headerString(req.headers.accept) ?? ''
@@ -183,24 +194,55 @@ function originMatchesHost(req: IncomingMessage): boolean {
   return from === host.toLowerCase()
 }
 
-async function readBody(req: IncomingMessage): Promise<string | null> {
+async function readBodyBytes(req: IncomingMessage, limit: number): Promise<Buffer | null> {
   const chunks: Buffer[] = []
   let total = 0
   for await (const chunk of req) {
     const buf = chunk as Buffer
     total += buf.length
-    if (total > BODY_LIMIT) return null
+    if (total > limit) return null
     chunks.push(buf)
   }
-  return Buffer.concat(chunks).toString('utf8')
+  return Buffer.concat(chunks)
+}
+
+async function readBody(req: IncomingMessage): Promise<string | null> {
+  const bytes = await readBodyBytes(req, BODY_LIMIT)
+  return bytes === null ? null : bytes.toString('utf8')
 }
 
 async function parseFields(
   req: IncomingMessage
-): Promise<{ ok: true; fields: Record<string, string> } | { ok: false; status: number; message: string }> {
+): Promise<{ ok: true; fields: Record<string, string>; imageBytes: Buffer | null } | { ok: false; status: number; message: string }> {
+  const type = mediaType(req)
+  if (type === 'multipart/form-data') {
+    const contentType = headerString(req.headers['content-type']) ?? ''
+    const rawBytes = await readBodyBytes(req, MULTIPART_LIMIT)
+    if (rawBytes === null) return { ok: false, status: 413, message: 'Request body is too large.' }
+    try {
+      const form = await new Request('http://localhost/', {
+        method: 'POST', headers: { 'content-type': contentType }, body: rawBytes
+      }).formData()
+      const fields: Record<string, string> = {}
+      const images = form.getAll('image')
+      if (images.length > 1) return { ok: false, status: 400, message: 'Only one image may be attached.' }
+      for (const [key, value] of form.entries()) {
+        if (key === 'image') continue
+        if (typeof value !== 'string') return { ok: false, status: 400, message: 'Form fields must be text.' }
+        fields[key] = value
+      }
+      const image = images[0]
+      if (image !== undefined && typeof image !== 'string') {
+        const bytes = Buffer.from(await image.arrayBuffer())
+        return { ok: true, fields, imageBytes: bytes.length === 0 ? null : bytes }
+      }
+      return { ok: true, fields, imageBytes: null }
+    } catch {
+      return { ok: false, status: 400, message: 'Invalid multipart form data.' }
+    }
+  }
   const raw = await readBody(req)
   if (raw === null) return { ok: false, status: 413, message: 'Request body is too large.' }
-  const type = mediaType(req)
   if (type === 'application/json') {
     let parsed: unknown
     try {
@@ -219,12 +261,12 @@ async function parseFields(
       }
       fields[key] = value
     }
-    return { ok: true, fields }
+    return { ok: true, fields, imageBytes: null }
   }
   if (type === 'application/x-www-form-urlencoded' || type === '') {
     const fields: Record<string, string> = {}
     for (const [key, value] of new URLSearchParams(raw).entries()) fields[key] = value
-    return { ok: true, fields }
+    return { ok: true, fields, imageBytes: null }
   }
   return { ok: false, status: 415, message: 'Unsupported Content-Type.' }
 }
@@ -246,6 +288,25 @@ function listEntries(db: SqliteDatabase, account: string | null): EntryView[] {
 function isVisible(identity: Identity, row: EntryView): boolean {
   if (identity.role === 'ADMIN') return true
   return row.authoredByAccount === identity.account
+}
+
+function scheduledInput(fields: Record<string, string>): { raw: string; values: { scheduledDate: string; scheduledHour: string; scheduledMinute: string } } | null {
+  const scheduledAt = fields.scheduledAt ?? ''
+  if (scheduledAt !== '') {
+    const match = /^(\d{4}-\d{2}-\d{2})T(\d{2}):(\d{2})(?::(\d{2}))?$/.exec(scheduledAt)
+    if (!match) return null
+    return { raw: `${match[1]}T${match[2]}:${match[3]}${match[4] ? `:${match[4]}` : ''}`, values: { scheduledDate: match[1]!, scheduledHour: match[2]!, scheduledMinute: match[3]! } }
+  }
+  const date = fields.scheduledDate ?? ''
+  const hour = fields.scheduledHour ?? ''
+  const minute = fields.scheduledMinute ?? ''
+  if (!date || !hour || !minute) return null
+  return { raw: `${date}T${hour}:${minute}`, values: { scheduledDate: date, scheduledHour: hour, scheduledMinute: minute } }
+}
+
+function validImage(bytes: Buffer | null): boolean {
+  if (bytes === null) return true
+  return bytes.length <= IMAGE_LIMIT && imageMime(bytes) !== null
 }
 
 export function createOutboxServer(deps: OutboxServerDeps): Server {
@@ -331,6 +392,12 @@ export function createOutboxServer(deps: OutboxServerDeps): Server {
       return
     }
 
+    if (method === 'GET' && pathname === '/assets/composer.js') {
+      const assetPath = join(dirname(fileURLToPath(import.meta.url)), 'assets', 'composer.js')
+      send(res, 200, readFileSync(assetPath), { 'content-type': 'text/javascript; charset=utf-8' })
+      return
+    }
+
     if (method === 'GET' && pathname === '/healthz') {
       const jwtOk = typeof deps.jwtSecret === 'string' && deps.jwtSecret !== ''
       const rulesOk = loadPackRules(deps.packRoot, brand) !== null
@@ -356,11 +423,55 @@ export function createOutboxServer(deps: OutboxServerDeps): Server {
         200,
         renderComposerPage({
           text: '',
-          scheduledAt: '',
+          ...nextSlotZurich(now()),
           charCount: 0,
           costHint: costHint('')
         })
       )
+      return
+    }
+
+    if (method === 'GET' && pathname === '/posts') {
+      const auth = await authenticate(req, 'OUTBOX')
+      if (!auth.ok) {
+        fail(res, req, pathname, auth.status, 'auth-failed', 'Sign in required.')
+        return
+      }
+      const rows = [...listEntries(deps.db, auth.identity.role === 'ADMIN' ? null : auth.identity.account)].reverse()
+      sendHtml(res, 200, renderPostsPage({
+        author: auth.identity.role !== 'ADMIN',
+        posts: rows.map((row) => ({
+          bundleId: row.bundleId,
+          state: row.state,
+          text: row.text,
+          scheduledLabel: formatZurich(row.scheduledAt),
+          channel: row.postId === null ? null : { postId: row.postId, status: row.channelStatus!, url: row.postUrl },
+          imageSha256: row.imageSha256,
+          authorMessage: authorStatusMessage(row.state, row.channelStatus)
+        }))
+      }))
+      return
+    }
+
+    const mediaMatch = /^\/media\/([a-f0-9]{64})$/.exec(pathname)
+    if (method === 'GET' && mediaMatch) {
+      const auth = await authenticate(req, 'OUTBOX')
+      if (!auth.ok) {
+        fail(res, req, pathname, auth.status, 'auth-failed', 'Sign in required.')
+        return
+      }
+      const sha256 = mediaMatch[1]!
+      const references = deps.db.prepare(`${ENTRY_VIEW_SQL} WHERE e.imageSha256 = ?`).all(sha256) as EntryView[]
+      if (!references.some((row) => isVisible(auth.identity, row))) {
+        sendJson(res, 404, { ok: false, reason: 'not-found', detail: 'Not found.' })
+        return
+      }
+      const media = deps.db.prepare('SELECT mime, bytes FROM media WHERE sha256 = ?').get(sha256) as { mime: string; bytes: Buffer } | undefined
+      if (!media) {
+        sendJson(res, 404, { ok: false, reason: 'not-found', detail: 'Not found.' })
+        return
+      }
+      send(res, 200, media.bytes, { 'content-type': media.mime, 'x-content-type-options': 'nosniff', 'cache-control': 'private, no-store' })
       return
     }
 
@@ -451,7 +562,9 @@ export function createOutboxServer(deps: OutboxServerDeps): Server {
                 channel: row.channel!,
                 status: row.channelStatus!,
                 url: row.postUrl
-              }
+              },
+          imageSha256: row.imageSha256,
+          authorMessage: authorStatusMessage(row.state, row.channelStatus)
         })
       )
       return
@@ -503,10 +616,6 @@ export function createOutboxServer(deps: OutboxServerDeps): Server {
         return
       }
       const text = parsed.fields.text ?? ''
-      if (text.trim() === '') {
-        fail(res, req, pathname, 400, 'invalid-request', 'Text is required.')
-        return
-      }
       const reviewed = reviewText(deps.packRoot, brand, text)
       if (!reviewed.ok) {
         sendJson(res, 409, { ok: false, reason: 'missing-pack', detail: 'Review pack is missing.' })
@@ -515,7 +624,9 @@ export function createOutboxServer(deps: OutboxServerDeps): Server {
       sendJson(res, 200, {
         ok: true,
         blocking: reviewed.checks.blocking,
-        hints: reviewed.checks.hints ?? []
+        hints: reviewed.checks.hints ?? [],
+        charCount: characterCount(text),
+        costHint: costHint(text)
       })
       return
     }
@@ -527,14 +638,37 @@ export function createOutboxServer(deps: OutboxServerDeps): Server {
         return
       }
       const text = parsed.fields.text ?? ''
-      const scheduledRaw = parsed.fields.scheduledAt ?? ''
+      const timeInput = scheduledInput(parsed.fields)
+      const timeFields = timeInput?.values ?? {
+        scheduledDate: parsed.fields.scheduledDate ?? parsed.fields.scheduledAt?.slice(0, 10) ?? '',
+        scheduledHour: parsed.fields.scheduledHour ?? parsed.fields.scheduledAt?.slice(11, 13) ?? '',
+        scheduledMinute: parsed.fields.scheduledMinute ?? parsed.fields.scheduledAt?.slice(14, 16) ?? ''
+      }
       if (text.trim() === '') {
-        fail(res, req, pathname, 400, 'invalid-request', 'Text is required.')
+        const detail = 'Text is required.'
+        if (wantsJson(req, pathname)) fail(res, req, pathname, 400, 'invalid-request', detail)
+        else sendHtml(res, 400, renderComposerPage({ text, ...timeFields, imageDropped: parsed.imageBytes !== null, error: detail, charCount: 0, costHint: costHint(text) }))
         return
       }
-      const scheduledAt = parseZurichDateTime(scheduledRaw)
+      const scheduledAt = timeInput ? parseZurichDateTime(timeInput.raw) : null
       if (scheduledAt === null) {
-        fail(res, req, pathname, 400, 'invalid-request', 'scheduledAt must be datetime-local in Europe/Zurich.')
+        const detail = 'Provide a valid scheduled time in Europe/Zurich.'
+        if (wantsJson(req, pathname)) fail(res, req, pathname, 400, 'invalid-request', detail)
+        else sendHtml(res, 400, renderComposerPage({ text, ...timeFields, imageDropped: parsed.imageBytes !== null, error: detail, charCount: characterCount(text), costHint: costHint(text) }))
+        return
+      }
+      if (scheduledAt % 60_000 !== 0 || Number(timeInput!.values.scheduledMinute) % 5 !== 0) {
+        const detail = 'Scheduled time must be on a 5-minute step.'
+        if (wantsJson(req, pathname)) fail(res, req, pathname, 400, 'invalid-request', detail)
+        else sendHtml(res, 400, renderComposerPage({ text, ...timeFields, imageDropped: parsed.imageBytes !== null, error: detail, charCount: characterCount(text), costHint: costHint(text) }))
+        return
+      }
+      if (!validImage(parsed.imageBytes)) {
+        if (wantsJson(req, pathname)) {
+          sendJson(res, 409, { ok: false, reason: 'bad-image', detail: 'Image must be a PNG or JPEG up to 5 MB.' })
+        } else {
+          sendHtml(res, 409, renderComposerPage({ text, ...timeFields, imageDropped: parsed.imageBytes !== null, error: 'Image must be a PNG or JPEG up to 5 MB.', charCount: characterCount(text), costHint: costHint(text) }))
+        }
         return
       }
 
@@ -558,7 +692,8 @@ export function createOutboxServer(deps: OutboxServerDeps): Server {
           409,
           renderComposerPage({
             text,
-            scheduledAt: scheduledRaw,
+            ...timeFields,
+            imageDropped: parsed.imageBytes !== null,
             error: 'Review pack is missing.',
             recorded: null,
             charCount: characterCount(text),
@@ -591,7 +726,8 @@ export function createOutboxServer(deps: OutboxServerDeps): Server {
           409,
           renderComposerPage({
             text,
-            scheduledAt: scheduledRaw,
+            ...timeFields,
+            imageDropped: parsed.imageBytes !== null,
             error: 'Blocking review finding.',
             recorded: reviewed.checks,
             charCount: characterCount(text),
@@ -605,6 +741,7 @@ export function createOutboxServer(deps: OutboxServerDeps): Server {
         text,
         scheduledAt,
         checks: reviewed.checks,
+        imageBytes: parsed.imageBytes,
         actor: { user: auth.identity.user, account: auth.identity.account },
         now: now()
       })
@@ -619,7 +756,8 @@ export function createOutboxServer(deps: OutboxServerDeps): Server {
           409,
           renderComposerPage({
             text,
-            scheduledAt: scheduledRaw,
+            ...timeFields,
+            imageDropped: parsed.imageBytes !== null,
             error: detail,
             recorded: reviewed.checks,
             charCount: characterCount(text),
