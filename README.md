@@ -132,6 +132,10 @@ sequenceDiagram
   end
   opt queued and due
     Note over B,X: Ticker, never Decide
+    opt image attached
+      B->>X: POST /2/media/upload
+      X-->>B: media id or error (failed, no tweet)
+    end
     B->>X: POST /2/tweets OAuth
     X-->>B: id or error
     B->>B: sent / failed / uncertain

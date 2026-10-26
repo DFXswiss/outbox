@@ -34,7 +34,7 @@
     "src/time.ts",
     "src/x-client.ts"
   ],
-  "inputsSha256": "8a0cf0a6e9b83eff776f4651437e788e90dc57ccc6f69bbfccfe72c8ad2ca6bc",
+  "inputsSha256": "295070fbc85bcd32be82b43304e62d7ec9291b9882acaedf7790b85635ee21db",
   "viewport": {
     "width": 760,
     "height": "visible body content + 24px"
