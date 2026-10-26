@@ -8,6 +8,11 @@ const unavailable = document.querySelector('#check-unavailable')
 const imageField = document.querySelector('#image')
 const imagePreview = document.querySelector('#image-preview')
 const imageMessage = document.querySelector('#image-message')
+const findingIcons = {
+  blocked: document.querySelector('#icon-blocked'),
+  hint: document.querySelector('#icon-hint'),
+  clear: document.querySelector('#icon-clear')
+}
 
 let requestNumber = 0
 let reviewController
@@ -18,9 +23,10 @@ let objectUrl
 function addLine(className, message) {
   const line = document.createElement('div')
   line.className = `finding ${className}`
+  const icon = findingIcons[className].content.firstElementChild.cloneNode(true)
   const label = document.createElement('span')
   label.textContent = message
-  line.append(label)
+  line.append(icon, label)
   checks.append(line)
 }
 

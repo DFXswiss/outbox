@@ -2,7 +2,9 @@ import { describe, expect, it } from 'vitest'
 import {
   renderComposerPage,
   renderPlainPage,
-  renderReviewPage
+  renderReviewPage,
+  renderPostsPage,
+  truncatePostText
 } from './html'
 
 const review = (overrides: Partial<Parameters<typeof renderReviewPage>[0]> = {}) => renderReviewPage({
@@ -112,6 +114,57 @@ describe('composer markup', () => {
     expect(blank).not.toContain('Checked:')
     expect(withFinding).toContain('A blocking finding.')
     expect(withFinding).not.toContain('Checked:')
+  })
+
+  it('keeps the hidden image preview hidden and provides the server finding icons to live review', () => {
+    const html = renderComposerPage({
+      text: '',
+      scheduledAt: '',
+      charCount: 0,
+      costHint: 'No cost estimate.'
+    })
+
+    expect(html).toContain('<img id="image-preview" hidden alt="Attached image">')
+    expect(html).toContain('[hidden]{display:none!important}')
+    expect(html).toContain('<template id="icon-blocked"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></template>')
+    expect(html).toContain('<template id="icon-hint"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3 2.8 19h18.4L12 3Z"/><path d="M12 9v4m0 3h.01"/></svg></template>')
+    expect(html).toContain('<template id="icon-clear"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12 4 4L19 6"/></svg></template>')
+  })
+})
+
+describe('post excerpts', () => {
+  const post = (text: string) => renderPostsPage({
+    author: true,
+    posts: [{
+      bundleId: 'bundle-1',
+      state: 'submitted',
+      scheduledLabel: '15 Jul 2024, 12:00',
+      text,
+      authorMessage: 'Waiting for approval.',
+      imageSha256: null,
+      channel: null
+    }]
+  })
+
+  it('leaves short text unchanged', () => {
+    expect(truncatePostText('A short post.')).toBe('A short post.')
+  })
+
+  it('ends a long excerpt at the last word boundary and adds an ellipsis', () => {
+    const text = `${'word '.repeat(21)}locationcorrected beyond the limit`
+    expect(truncatePostText(text)).toBe(`${'word '.repeat(21).trimEnd()}…`)
+  })
+
+  it('cuts a single long word at 120 code points and adds an ellipsis', () => {
+    expect(truncatePostText('x'.repeat(130))).toBe(`${'x'.repeat(120)}…`)
+    expect(truncatePostText('x'.repeat(120))).toBe('x'.repeat(120))
+    expect(truncatePostText('x'.repeat(121))).toBe(`${'x'.repeat(120)}…`)
+  })
+
+  it('counts emoji as code points and escapes the rendered excerpt', () => {
+    const text = `${'😀'.repeat(121)}<tail>`
+    expect(truncatePostText(text)).toBe(`${'😀'.repeat(120)}…`)
+    expect(post(text)).toContain(`<p>${'😀'.repeat(120)}…</p>`)
   })
 })
 

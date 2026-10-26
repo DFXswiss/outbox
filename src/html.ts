@@ -14,6 +14,7 @@ const STYLE = [
   '@font-face{font-family:Inter;src:url("/assets/fonts/Inter-SemiBold.woff2") format("woff2");font-style:normal;font-weight:600;font-display:swap}',
   '@font-face{font-family:Inter;src:url("/assets/fonts/Inter-Bold.woff2") format("woff2");font-style:normal;font-weight:700;font-display:swap}',
   '*{box-sizing:border-box}',
+  '[hidden]{display:none!important}',
   ':root{color-scheme:light;--bg:#f6f8fc;--surface:#fff;--surface-soft:#eef3fa;--text:#0b1426;--text-secondary:#566174;--text-muted:#8d98aa;--border:#dde5f0;--primary:#1e6ef7;--primary-hover:#0b57cf;--primary-soft:#e6f0ff;--primary-ink:#174ea6;--success:#16a34a;--success-ink:#166534;--success-soft:#dcfce7;--warning:#8a5a00;--warning-ink:#754700;--warning-soft:#fff4d6;--warning-border:#f1d58e;--error:#b91c1c;--error-ink:#991b1b;--error-soft:#fee2e2;--error-border:#f4b4b4;--neutral:#566174;--neutral-soft:#eef2f7;--primary-text:#fff;--transparent:transparent;--radius-sm:6px;--radius-md:10px;--radius-lg:16px;--radius-button:14px;--radius-pill:999px;--radius-circle:50%;--space-1:4px;--space-2:8px;--space-2_5:10px;--space-3:12px;--space-4:16px;--space-5:24px;--space-6:32px;--space-7:48px;--shadow-card:0 6px 20px rgba(11,20,38,.05);--shadow-button:0 4px 12px rgba(11,87,207,.18);--shadow-button-hover:0 6px 16px rgba(11,87,207,.22)}',
   'body{margin:0;background:var(--bg);color:var(--text);font-family:Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;font-size:16px;line-height:1.55;-webkit-font-smoothing:antialiased}',
   'main{width:min(100% - 32px,720px);margin:0 auto;padding:var(--space-5) 0 var(--space-7)}',
@@ -29,6 +30,9 @@ const STYLE = [
   '.form-card{padding:var(--space-4)}',
   'label{display:block;margin:0 0 var(--space-2);font-size:14px;font-weight:600}',
   'textarea,input[type=date],input[type=url],select,input[type=file]{display:block;width:100%;min-height:48px;padding:var(--space-3);border:1px solid var(--border);border-radius:var(--radius-md);background:var(--surface);color:var(--text);font:inherit;line-height:1.45}',
+  'input[type=file]{padding:var(--space-1) var(--space-3)}',
+  'input[type=file]::file-selector-button{padding:var(--space-2) var(--space-4);margin-right:var(--space-3);border:1px solid var(--primary);border-radius:var(--radius-button);background:var(--surface);color:var(--primary-hover);font:600 15px/1.2 Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;cursor:pointer}',
+  'input[type=file]::file-selector-button:hover{background:var(--primary-soft)}',
   'textarea{min-height:160px;resize:vertical;white-space:pre-wrap}',
   'textarea:focus-visible,input:focus-visible{outline:2px solid var(--primary);outline-offset:2px;border-color:var(--primary)}',
   '.field{margin:0 0 var(--space-4)}',
@@ -207,6 +211,9 @@ ${error}
   <p class="meta"><span class="tabular" id="character-count">${input.charCount}</span> characters. <span id="cost-hint">${escapeHtml(input.costHint)}</span></p>
 </section>
 ${findings}
+<template id="icon-blocked">${ICONS.cross}</template>
+<template id="icon-hint">${ICONS.warning}</template>
+<template id="icon-clear">${ICONS.check}</template>
 <p class="meta" id="check-unavailable" hidden>Check unavailable — it runs again on submit.</p>
 <script src="/assets/composer.js" defer></script>
 </main>`
@@ -308,9 +315,25 @@ export function authorStatusMessage(state: string, channelStatus: string | null)
   return ''
 }
 
+export function truncatePostText(text: string): string {
+  const characters = Array.from(text)
+  if (characters.length <= 120) return text
+
+  const excerpt = characters.slice(0, 120)
+  let boundary = -1
+  for (let index = excerpt.length - 1; index >= 0; index -= 1) {
+    if (/\s/u.test(excerpt[index])) {
+      boundary = index
+      break
+    }
+  }
+  const shortened = (boundary >= 0 ? excerpt.slice(0, boundary) : excerpt).join('').trimEnd()
+  return `${shortened}…`
+}
+
 export function renderPostsPage(input: { posts: PostListItem[]; author: boolean }): string {
   const content = input.posts.length === 0
     ? `<section class="card"><p>No posts yet.</p>${input.author ? '<a href="/">Write a post</a>' : ''}</section>`
-    : `<div class="posts">${input.posts.map((post) => `<article class="card post-card"><div class="meta-row">${statusChip(post.state)}${post.channel ? statusChip(post.channel.status) : ''}<span class="meta tabular">${escapeHtml(post.scheduledLabel)}</span></div><p>${escapeHtml([...post.text].slice(0, 120).join(''))}</p>${post.imageSha256 ? '<p class="meta">Image attached</p>' : ''}<p>${escapeHtml(post.authorMessage)}</p>${post.channel?.status === 'sent' && post.channel.url ? `<a href="${escapeHtml(post.channel.url)}">View on X</a> · ` : ''}<a href="/review/${encodeURIComponent(post.bundleId)}">Open</a></article>`).join('')}</div>`
+    : `<div class="posts">${input.posts.map((post) => `<article class="card post-card"><div class="meta-row">${statusChip(post.state)}${post.channel ? statusChip(post.channel.status) : ''}<span class="meta tabular">${escapeHtml(post.scheduledLabel)}</span></div><p>${escapeHtml(truncatePostText(post.text))}</p>${post.imageSha256 ? '<p class="meta">Image attached</p>' : ''}<p>${escapeHtml(post.authorMessage)}</p>${post.channel?.status === 'sent' && post.channel.url ? `<a href="${escapeHtml(post.channel.url)}">View on X</a> · ` : ''}<a href="/review/${encodeURIComponent(post.bundleId)}">Open</a></article>`).join('')}</div>`
   return page('Posts', `<main>${brandHeader()}${navigation('posts')}<h1>Posts</h1>${content}</main>`)
 }
