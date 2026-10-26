@@ -126,6 +126,7 @@ describe('composer markup', () => {
 
     expect(html).toContain('<img id="image-preview" hidden alt="Attached image">')
     expect(html).toContain('[hidden]{display:none!important}')
+    expect(html).toContain('button:disabled,button:disabled:hover{background:var(--neutral-soft)')
     expect(html).toContain('<template id="icon-blocked"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></template>')
     expect(html).toContain('<template id="icon-hint"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3 2.8 19h18.4L12 3Z"/><path d="M12 9v4m0 3h.01"/></svg></template>')
     expect(html).toContain('<template id="icon-clear"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12 4 4L19 6"/></svg></template>')

@@ -40,6 +40,7 @@ const STYLE = [
   'button{display:inline-flex;align-items:center;justify-content:center;min-height:48px;padding:0 var(--space-5);border:1px solid var(--transparent);border-radius:var(--radius-button);background:var(--primary);box-shadow:var(--shadow-button);color:var(--primary-text);font:600 16px/1.2 Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;cursor:pointer;transition:background-color .15s ease,box-shadow .15s ease,transform .15s ease}',
   'button:hover{background:var(--primary-hover);box-shadow:var(--shadow-button-hover)}',
   'button:active{transform:translateY(1px)}',
+  'button:disabled,button:disabled:hover{background:var(--neutral-soft);box-shadow:none;color:var(--text-muted);cursor:not-allowed;transform:none}',
   'button:focus-visible,a:focus-visible{outline:2px solid var(--primary);outline-offset:3px}',
   'button.destructive{background:var(--surface);border-color:var(--error);box-shadow:none;color:var(--error)}',
   'button.destructive:hover{background:var(--error-soft)}',
