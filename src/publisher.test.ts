@@ -237,6 +237,56 @@ describe('serial publisher', () => {
     await publisher.stop()
   })
 
+  it('keeps a definite media upload failure failed when recording its result fails', async () => {
+    const imageBytes = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, 1])
+    const created = submitSubmission(db, {
+      text: 'media upload failure',
+      scheduledAt: NOW,
+      imageBytes,
+      checks: { blocking: [] },
+      actor: ACTOR,
+      now: SETUP_NOW
+    })
+    if (!created.ok) throw new Error('submission failed')
+    const decided = decideEntry(db, {
+      entryId: created.entryId,
+      decision: 'approve',
+      actor: ADMIN,
+      now: SETUP_NOW
+    })
+    if (!decided.ok) throw new Error('approval failed')
+    const post = db.prepare('SELECT id FROM scheduled_posts WHERE entryId = ?')
+      .get(created.entryId) as { id: string }
+    db.exec(`
+      CREATE TRIGGER fail_media_upload_result
+      BEFORE INSERT ON publish_results
+      WHEN NEW.error = 'media upload failed'
+      BEGIN
+        SELECT RAISE(ABORT, 'cannot record media upload failure');
+      END
+    `)
+    let sends = 0
+    const { publisher, alerts } = harness(async () => {
+      sends += 1
+      return {
+        result: { channel: 'x', ok: false, error: 'media upload failed' },
+        needsLogin: false
+      }
+    })
+
+    await publisher.start()
+    await publisher.tick()
+
+    expect(sends).toBe(1)
+    expect(status(post.id)).toBe('failed')
+    expect(alerts).toEqual([{
+      kind: 'failed',
+      postId: post.id,
+      detail: 'unexpected publisher failure'
+    }])
+    await publisher.stop()
+  })
+
   it('does not send when the boot probe is bad', async () => {
     const post = approve('future', NOW + 50)
     let sends = 0

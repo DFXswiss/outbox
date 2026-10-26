@@ -84,8 +84,8 @@ export function createPublisher(deps: PublisherDeps) {
       }
 
       let dispatchStarted = false
+      let result: PublishResult | null = null
       try {
-        let result: PublishResult | null = null
         let needsLogin = false
         let imageBytes: Buffer | null = null
         try {
@@ -161,25 +161,28 @@ export function createPublisher(deps: PublisherDeps) {
         }
       } catch {
         const detail = 'unexpected publisher failure'
+        const uncertain = result === null
+          ? dispatchStarted
+          : result.ok || result.uncertain === true
         try {
           const finished = finishPost(deps.db, {
             postId: post.postId,
             result: {
               channel: 'x',
               ok: false,
-              uncertain: dispatchStarted,
+              uncertain,
               error: detail
             },
             now: now()
           })
           deps.alert({
-            kind: dispatchStarted ? 'uncertain' : 'failed',
+            kind: uncertain ? 'uncertain' : 'failed',
             postId: post.postId,
             detail: finished.ok ? detail : 'could not record publish outcome'
           })
         } catch {
           deps.alert({
-            kind: dispatchStarted ? 'uncertain' : 'failed',
+            kind: uncertain ? 'uncertain' : 'failed',
             postId: post.postId,
             detail: 'could not record publish outcome'
           })

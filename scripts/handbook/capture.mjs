@@ -444,8 +444,8 @@ async function main() {
   await composer.page.goto(`http://127.0.0.1:${appPort}/`)
   const language = await composer.page.evaluate(() => navigator.language)
   if (language !== 'en-GB') fail(`Expected browser language en-GB before the blank form capture; got ${language}`)
-  await setScheduledTime(composer.page, zonedDate(10))
   await capture(composer.page, '01-composer', '01-blank', ['Submit for approval', 'Preview'])
+  await setScheduledTime(composer.page, zonedDate(10))
 
   const emptyAuthorPosts = await composer.context.newPage()
   await emptyAuthorPosts.goto(`http://127.0.0.1:${appPort}/posts`)
@@ -482,7 +482,11 @@ async function main() {
   const badImageNavigation = composer.page.waitForNavigation()
   await composer.page.locator('#submit-button').click()
   await badImageNavigation
-  await capture(composer.page, '01-composer', '08-bad-image', ['Image must be a PNG or JPEG up to 5 MB.'])
+  await composer.page.getByText('No blocking findings and no hints.', { exact: true }).waitFor()
+  await capture(composer.page, '01-composer', '08-bad-image', [
+    'Image must be a PNG or JPEG up to 5 MB.',
+    'No blocking findings and no hints.'
+  ])
 
   const noScriptContext = await browser.newContext({ viewport, deviceScaleFactor, locale: 'en-GB', timezoneId: 'Europe/Zurich', javaScriptEnabled: false, extraHTTPHeaders: { authorization: `Bearer ${jwt('OUTBOX')}` } })
   const droppedPage = await noScriptContext.newPage()
@@ -508,7 +512,11 @@ async function main() {
   await composer.page.locator('#text').fill('A neutral post with a future review time.')
   await setScheduledTime(composer.page, zonedDate(-10))
   await Promise.all([composer.page.waitForNavigation(), composer.page.locator('button[type=submit]').click()])
-  await capture(composer.page, '01-composer', '03-past-time', ['The scheduled time is already in the past.'])
+  await composer.page.getByText('No blocking findings and no hints.', { exact: true }).waitFor()
+  await capture(composer.page, '01-composer', '03-past-time', [
+    'The scheduled time is already in the past.',
+    'No blocking findings and no hints.'
+  ])
 
   const clear = await submit(composer, 'A short update is scheduled after tomorrow’s review.')
   const clearApprover = await reviewPage(approver.context, clear.bundleId)
@@ -597,7 +605,11 @@ async function main() {
   await missingPackContext.page.locator('#text').fill('We will share the revised opening hours tomorrow morning.')
   await setScheduledTime(missingPackContext.page, zonedDate(10, true))
   await Promise.all([missingPackContext.page.waitForNavigation(), missingPackContext.page.locator('button[type=submit]').click()])
-  await capture(missingPackContext.page, '01-composer', '04-pack-missing', ['Review pack is missing.'])
+  await missingPackContext.page.getByText('Check unavailable — it runs again on submit.', { exact: true }).waitFor()
+  await capture(missingPackContext.page, '01-composer', '04-pack-missing', [
+    'Review pack is missing.',
+    'Check unavailable — it runs again on submit.'
+  ])
   await missingPackContext.context.close()
   app = originalApp
   appPort = originalAppPort
