@@ -8,7 +8,7 @@ Composers can open Posts to see each of their posts, its approval or publishing 
 
 ## Roles
 
-The Composer has the `OUTBOX` role. A composer can submit a post. Retraction is currently available only through the API; the page has no retract button. An Approver has the `ADMIN` role. An approver can approve or reject submitted posts, optionally with a comment the composer sees on the post and in Posts, retry failed posts, and resolve uncertain posts.
+The Composer has the `OUTBOX` role. A composer can submit a post. Retraction is currently available only through the API; the page has no retract button. An Approver has the `ADMIN` role. An approver can approve or reject submitted posts, optionally with a comment that everyone who can see the post reads on its page and, shortened, in Posts, retry failed posts, and resolve uncertain posts.
 
 ## Statuses
 
