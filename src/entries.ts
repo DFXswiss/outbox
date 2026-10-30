@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { z } from 'zod'
 import { writeAudit } from './audit'
 import { contentHash, imageSha256 } from './content-hash'
+import { IMAGE_LIMIT, imageMime } from './image'
 import type { SqliteDatabase } from './db'
 import type { ChannelId, EntryState } from './status'
 
@@ -17,8 +18,7 @@ export type Actor = {
  * value without `blocking` is not a pass — `canDecide` rejects those.
  */
 export const EntryChecksSchema = z.object({
-  blocking: z.array(z.string()),
-  hints: z.array(z.string()).optional()
+  blocking: z.array(z.string())
 })
 export type EntryChecks = z.infer<typeof EntryChecksSchema>
 
@@ -46,9 +46,9 @@ export type RetractResult = { ok: true } | { ok: false; reason: 'conflict' }
 export type DecideInput = {
   entryId: string
   decision: 'approve' | 'reject'
+  comment: string | null
   actor: Actor
   now?: number
-  imageBytes?: Buffer | Uint8Array | null
 }
 
 export type DecideResult =
@@ -132,6 +132,11 @@ function imageBytesOrEmpty(
 export function submitSubmission(db: SqliteDatabase, input: SubmitInput): SubmitResult {
   const now = clock(input.now)
   const actor = input.actor
+  const bytes = imageBytesOrEmpty(input.imageBytes)
+  const mime = bytes === null ? null : imageMime(bytes)
+  if (bytes !== null && (mime === null || bytes.byteLength > IMAGE_LIMIT)) {
+    throw new Error('Image must be a PNG or JPEG up to 5 MB.')
+  }
 
   return inImmediate(db, () => {
     if (input.scheduledAt <= now) {
@@ -149,7 +154,6 @@ export function submitSubmission(db: SqliteDatabase, input: SubmitInput): Submit
 
     const bundleId = randomUUID()
     const entryId = randomUUID()
-    const bytes = imageBytesOrEmpty(input.imageBytes)
     const hash = contentHash(input.text, input.scheduledAt, bytes)
     const checksJson = input.checks === null ? null : JSON.stringify(input.checks)
 
@@ -173,6 +177,12 @@ export function submitSubmission(db: SqliteDatabase, input: SubmitInput): Submit
       hash,
       checksJson
     )
+
+    if (bytes) {
+      const sha256 = imageSha256(bytes)
+      db.prepare('INSERT OR IGNORE INTO media (sha256, mime, bytes, createdAt) VALUES (?, ?, ?, ?)')
+        .run(sha256, mime!, Buffer.from(bytes), now)
+    }
 
     writeAudit(db, {
       at: now,
@@ -301,11 +311,17 @@ export function decideEntry(db: SqliteDatabase, input: DecideInput): DecideResul
           return { ok: false, reason: 'not-approvable', detail: lock }
         }
 
-        const recomputed = contentHash(
-          entry.text,
-          entry.scheduledAt,
-          imageBytesOrEmpty(input.imageBytes)
-        )
+        let bytes: Buffer | Uint8Array | null = null
+        if (entry.imageSha256 !== null) {
+          const media = db.prepare('SELECT bytes FROM media WHERE sha256 = ?').get(entry.imageSha256) as { bytes: Buffer } | undefined
+          if (!media) {
+            const detail = 'The attached image is missing, so this entry cannot be approved.'
+            writeAudit(db, { at: now, event: 'refused', bundleId: entry.bundleId, entryId: input.entryId, actorUser: actor.user, actorAccount: actor.account, reason: detail })
+            return { ok: false, reason: 'not-approvable', detail }
+          }
+          bytes = media.bytes
+        }
+        const recomputed = contentHash(entry.text, entry.scheduledAt, bytes)
         if (recomputed !== entry.contentHash) {
           writeAudit(db, {
             at: now,
@@ -324,10 +340,10 @@ export function decideEntry(db: SqliteDatabase, input: DecideInput): DecideResul
       const updated = db
         .prepare(
           `UPDATE entries
-           SET state = ?, decidedByUser = ?, decidedByAccount = ?, decidedAt = ?
+           SET state = ?, decidedByUser = ?, decidedByAccount = ?, decidedAt = ?, decisionComment = ?
            WHERE id = ? AND state = ?`
         )
-        .run(nextState, actor.user, actor.account, now, input.entryId, 'submitted' satisfies EntryState)
+        .run(nextState, actor.user, actor.account, now, input.comment, input.entryId, 'submitted' satisfies EntryState)
 
       if (updated.changes !== 1) return refuseConflict()
 

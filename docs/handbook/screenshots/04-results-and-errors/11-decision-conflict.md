@@ -1,3 +1,3 @@
 # Request failed: decision conflict
 
-The page says Request failed and Decide conflict. The entry has already been decided. Open its review page to see the current state.
+The page shows the Outbox brand, an error icon, the heading “Request failed,” and the message “Decide conflict.”

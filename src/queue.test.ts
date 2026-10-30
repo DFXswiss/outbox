@@ -42,6 +42,7 @@ function approved(scheduledAt = NOW + 1) {
   const decision = decideEntry(db, {
     entryId: submitted.entryId,
     decision: 'approve',
+    comment: null,
     actor: ADMIN,
     now: SETUP_NOW
   })

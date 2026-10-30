@@ -1,5 +1,4 @@
 import type { EntryChecks } from './entries'
-import { REVIEW_SCOPE } from './findings'
 
 export function escapeHtml(value: string): string {
   return value
@@ -15,11 +14,13 @@ const STYLE = [
   '@font-face{font-family:Inter;src:url("/assets/fonts/Inter-SemiBold.woff2") format("woff2");font-style:normal;font-weight:600;font-display:swap}',
   '@font-face{font-family:Inter;src:url("/assets/fonts/Inter-Bold.woff2") format("woff2");font-style:normal;font-weight:700;font-display:swap}',
   '*{box-sizing:border-box}',
+  '[hidden]{display:none!important}',
   ':root{color-scheme:light;--bg:#f6f8fc;--surface:#fff;--surface-soft:#eef3fa;--text:#0b1426;--text-secondary:#566174;--text-muted:#8d98aa;--border:#dde5f0;--primary:#1e6ef7;--primary-hover:#0b57cf;--primary-soft:#e6f0ff;--primary-ink:#174ea6;--success:#16a34a;--success-ink:#166534;--success-soft:#dcfce7;--warning:#8a5a00;--warning-ink:#754700;--warning-soft:#fff4d6;--warning-border:#f1d58e;--error:#b91c1c;--error-ink:#991b1b;--error-soft:#fee2e2;--error-border:#f4b4b4;--neutral:#566174;--neutral-soft:#eef2f7;--primary-text:#fff;--transparent:transparent;--radius-sm:6px;--radius-md:10px;--radius-lg:16px;--radius-button:14px;--radius-pill:999px;--radius-circle:50%;--space-1:4px;--space-2:8px;--space-2_5:10px;--space-3:12px;--space-4:16px;--space-5:24px;--space-6:32px;--space-7:48px;--shadow-card:0 6px 20px rgba(11,20,38,.05);--shadow-button:0 4px 12px rgba(11,87,207,.18);--shadow-button-hover:0 6px 16px rgba(11,87,207,.22)}',
   'body{margin:0;background:var(--bg);color:var(--text);font-family:Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;font-size:16px;line-height:1.55;-webkit-font-smoothing:antialiased}',
   'main{width:min(100% - 32px,720px);margin:0 auto;padding:var(--space-5) 0 var(--space-7)}',
   '.brand{display:flex;align-items:center;gap:var(--space-3);margin-bottom:var(--space-6);color:var(--text-secondary);font-size:14px;font-weight:600;letter-spacing:.01em}',
   '.brand svg{display:block;width:77px;height:24px;flex:none}',
+  '.nav{display:flex;gap:var(--space-4);margin:-24px 0 var(--space-5)}.nav a[aria-current="page"]{color:var(--text);text-decoration:none}',
   'h1{margin:0 0 var(--space-2);font-size:26px;line-height:1.2;letter-spacing:-.025em}',
   'p{margin:0 0 var(--space-3)}',
   '.meta,.scope,.secondary{color:var(--text-secondary);font-size:13px;line-height:1.5}',
@@ -28,14 +29,19 @@ const STYLE = [
   '.card{min-width:0;margin:var(--space-4) 0;padding:var(--space-4);background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-lg);box-shadow:var(--shadow-card)}',
   '.form-card{padding:var(--space-4)}',
   'label{display:block;margin:0 0 var(--space-2);font-size:14px;font-weight:600}',
-  'textarea,input[type=datetime-local],input[type=url]{display:block;width:100%;min-height:48px;padding:var(--space-3);border:1px solid var(--border);border-radius:var(--radius-md);background:var(--surface);color:var(--text);font:inherit;line-height:1.45}',
+  'textarea,input[type=date],input[type=url],select,input[type=file]{display:block;width:100%;min-height:48px;padding:var(--space-3);border:1px solid var(--border);border-radius:var(--radius-md);background:var(--surface);color:var(--text);font:inherit;line-height:1.45}',
+  'input[type=file]{padding:var(--space-1) var(--space-3)}',
+  'input[type=file]::file-selector-button{padding:var(--space-2) var(--space-4);margin-right:var(--space-3);border:1px solid var(--primary);border-radius:var(--radius-button);background:var(--surface);color:var(--primary-hover);font:600 15px/1.2 Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;cursor:pointer}',
+  'input[type=file]::file-selector-button:hover{background:var(--primary-soft)}',
   'textarea{min-height:160px;resize:vertical;white-space:pre-wrap}',
   'textarea:focus-visible,input:focus-visible{outline:2px solid var(--primary);outline-offset:2px;border-color:var(--primary)}',
   '.field{margin:0 0 var(--space-4)}',
   '.actions{display:flex;flex-wrap:wrap;align-items:center;gap:var(--space-3);margin-top:var(--space-4)}',
+  '.actions .field{flex-basis:100%;margin:0}.actions textarea{min-height:96px}',
   'button{display:inline-flex;align-items:center;justify-content:center;min-height:48px;padding:0 var(--space-5);border:1px solid var(--transparent);border-radius:var(--radius-button);background:var(--primary);box-shadow:var(--shadow-button);color:var(--primary-text);font:600 16px/1.2 Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;cursor:pointer;transition:background-color .15s ease,box-shadow .15s ease,transform .15s ease}',
   'button:hover{background:var(--primary-hover);box-shadow:var(--shadow-button-hover)}',
   'button:active{transform:translateY(1px)}',
+  'button:disabled,button:disabled:hover{background:var(--neutral-soft);box-shadow:none;color:var(--text-muted);cursor:not-allowed;transform:none}',
   'button:focus-visible,a:focus-visible{outline:2px solid var(--primary);outline-offset:3px}',
   'button.destructive{background:var(--surface);border-color:var(--error);box-shadow:none;color:var(--error)}',
   'button.destructive:hover{background:var(--error-soft)}',
@@ -52,14 +58,16 @@ const STYLE = [
   '.status-unknown{background:var(--neutral-soft);color:var(--neutral)}',
   '.preview .text{margin:0;white-space:pre-wrap;overflow-wrap:anywhere}',
   '.preview .meta{margin:var(--space-3) 0 0}',
+  '.preview img{display:block;max-width:100%;height:auto;margin-top:var(--space-3);border-radius:var(--radius-md)}',
+  '.schedule{display:grid;grid-template-columns:1fr 1fr 1fr;gap:var(--space-3);border:0;padding:0;margin:0 0 var(--space-4)}.schedule legend{margin-bottom:var(--space-2);font-size:14px;font-weight:600}.schedule label{font-size:13px}',
+  '.posts{display:grid;gap:var(--space-3)}.post-card{margin:0}.post-card p{white-space:pre-wrap;overflow-wrap:anywhere}',
   '.checks{display:grid;gap:var(--space-3)}',
   '.finding{display:flex;align-items:flex-start;gap:var(--space-3);font-weight:600}',
   '.finding svg,.result-icon svg,.callout svg{width:20px;height:20px;flex:none}',
   '.finding.blocked{color:var(--error)}',
-  '.finding.hint{color:var(--warning)}',
   '.finding.clear{color:var(--success-ink);font-weight:500}',
+  '.comment-text{white-space:pre-wrap;overflow-wrap:anywhere}',
   '.scope{margin:0;padding-top:var(--space-3)}',
-  '.scope.separated{border-top:1px solid var(--border)}',
   '.callout{display:flex;align-items:flex-start;gap:var(--space-3);margin:var(--space-4) 0;padding:var(--space-3) var(--space-4);border:1px solid var(--border);border-radius:var(--radius-md);font-size:14px}',
   '.callout p{margin:0}',
   '.callout.locked{background:var(--warning-soft);border-color:var(--warning-border);color:var(--warning-ink)}',
@@ -104,6 +112,10 @@ function brandHeader(): string {
   return `<header class="brand">${LOGO}<span>Outbox</span></header>`
 }
 
+function navigation(active: 'new' | 'posts'): string {
+  return `<nav class="nav" aria-label="Outbox"><a href="/"${active === 'new' ? ' aria-current="page"' : ''}>New post</a><a href="/posts"${active === 'posts' ? ' aria-current="page"' : ''}>Posts</a></nav>`
+}
+
 function statusClass(status: string): string {
   const known: Record<string, string> = {
     submitted: 'status-submitted',
@@ -125,25 +137,22 @@ function statusChip(status: string): string {
 
 function renderChecks(recorded: EntryChecks | null | undefined): string {
   if (recorded === undefined) {
-    return `<section class="card checks" aria-label="Review checks"><p class="scope">${escapeHtml(REVIEW_SCOPE)}</p></section>`
+    return `<section class="card checks" id="review-checks" aria-label="Review checks" aria-live="polite"><p class="scope">Checks appear here as you type.</p></section>`
   }
   if (recorded === null) {
     return (
-      `<section class="card checks" aria-label="Review checks">` +
+      `<section class="card checks" id="review-checks" aria-label="Review checks" aria-live="polite">` +
       `<div class="finding blocked">${ICONS.cross}<span>No usable review check is recorded.</span></div>` +
-      `<p class="scope separated">${escapeHtml(REVIEW_SCOPE)}</p>` +
       `</section>`
     )
   }
   const lines = [
-    ...recorded.blocking.map((line) => `<div class="finding blocked">${ICONS.cross}<span>${escapeHtml(line)}</span></div>`),
-    ...(recorded.hints ?? []).map((line) => `<div class="finding hint">${ICONS.warning}<span>${escapeHtml(line)}</span></div>`)
+    ...recorded.blocking.map((line) => `<div class="finding blocked">${ICONS.cross}<span>${escapeHtml(line)}</span></div>`)
   ]
   if (lines.length === 0) {
-    lines.push(`<div class="finding clear">${ICONS.check}<span>No blocking findings and no hints.</span></div>`)
+    lines.push(`<div class="finding clear">${ICONS.check}<span>No blocking findings.</span></div>`)
   }
-  lines.push(`<p class="scope separated">${escapeHtml(REVIEW_SCOPE)}</p>`)
-  return `<section class="card checks" aria-label="Review checks">${lines.join('')}</section>`
+  return `<section class="card checks" id="review-checks" aria-label="Review checks" aria-live="polite">${lines.join('')}</section>`
 }
 
 type PlainPageKind = 'success' | 'error' | 'neutral'
@@ -162,15 +171,24 @@ export function renderPlainPage(title: string, message: string): string {
 
 export type ComposerPageInput = {
   text: string
-  scheduledAt: string
+  scheduledAt?: string
+  scheduledDate?: string
+  scheduledHour?: string
+  scheduledMinute?: string
   error?: string
   /** Omit on a blank form. null is "no usable check", not an empty result. */
   recorded?: EntryChecks | null
   charCount: number
   costHint: string
+  imageDropped?: boolean
 }
 
 export function renderComposerPage(input: ComposerPageInput): string {
+  const date = input.scheduledDate ?? input.scheduledAt?.slice(0, 10) ?? ''
+  const hour = input.scheduledHour ?? input.scheduledAt?.slice(11, 13) ?? ''
+  const minute = input.scheduledMinute ?? input.scheduledAt?.slice(14, 16) ?? ''
+  const hours = Array.from({ length: 24 }, (_, value) => String(value).padStart(2, '0'))
+  const minutes = Array.from({ length: 12 }, (_, value) => String(value * 5).padStart(2, '0'))
   const error = input.error
     ? `<div class="callout error">${ICONS.cross}<p>${escapeHtml(input.error)}</p></div>`
     : ''
@@ -178,19 +196,26 @@ export function renderComposerPage(input: ComposerPageInput): string {
   const body = `
 <main>
 ${brandHeader()}
+${navigation('new')}
 <h1>Outbox</h1>
 <p class="intro meta">Submit for approval. There is no publish or schedule action without an approver.</p>
 ${error}
-<form class="card form-card" method="post" action="/api/submit">
+<form class="card form-card" method="post" action="/api/submit" enctype="multipart/form-data">
   <div class="field"><label for="text">Text</label><textarea id="text" name="text" required>${escapeHtml(input.text)}</textarea></div>
-  <div class="field"><label for="scheduledAt">Scheduled time (Europe/Zurich)</label><input id="scheduledAt" name="scheduledAt" type="datetime-local" required value="${escapeHtml(input.scheduledAt)}"></div>
-  <button type="submit">Submit for approval</button>
+  <fieldset class="schedule"><legend>Scheduled time (Europe/Zurich)</legend><div class="field"><label for="scheduledDate">Date</label><input id="scheduledDate" name="scheduledDate" type="date" required value="${escapeHtml(date)}"></div><div class="field"><label for="scheduledHour">Hour</label><select id="scheduledHour" name="scheduledHour" required>${hours.map((value) => `<option value="${value}"${hour === value ? ' selected' : ''}>${value}</option>`).join('')}</select></div><div class="field"><label for="scheduledMinute">Minute</label><select id="scheduledMinute" name="scheduledMinute" required>${minutes.map((value) => `<option value="${value}"${minute === value ? ' selected' : ''}>${value}</option>`).join('')}</select></div></fieldset>
+  <div class="field"><label for="image">Image (optional, PNG or JPEG, up to 5 MB)</label><input id="image" name="image" type="file" accept="image/png,image/jpeg"><p class="meta" id="image-message">${input.imageDropped ? 'Choose the image again — it was not kept.' : ''}</p></div>
+  <button id="submit-button" type="submit">Submit for approval</button>
 </form>
 <section class="card preview" aria-label="Preview">
-  <div class="text">${input.text ? escapeHtml(input.text) : '<em>Preview</em>'}</div>
-  <p class="meta"><span class="tabular">${input.charCount}</span> characters. ${escapeHtml(input.costHint)}</p>
+  <div class="text" id="preview-text">${input.text ? escapeHtml(input.text) : '<em>Preview</em>'}</div>
+  <img id="image-preview" hidden alt="Attached image">
+  <p class="meta"><span class="tabular" id="character-count">${input.charCount}</span> characters. <span id="cost-hint">${escapeHtml(input.costHint)}</span></p>
 </section>
 ${findings}
+<template id="icon-blocked">${ICONS.cross}</template>
+<template id="icon-clear">${ICONS.check}</template>
+<p class="meta" id="check-unavailable" hidden>Check unavailable — it runs again on submit.</p>
+<script src="/assets/composer.js" defer></script>
 </main>`
   return page('Outbox', body)
 }
@@ -205,6 +230,9 @@ export type ReviewPageInput = {
   lockReason: string | null
   approver: boolean
   channel: { postId: string; channel: string; status: string; url: string | null } | null
+  imageSha256?: string | null
+  authorMessage?: string | null
+  decisionComment?: string | null
 }
 
 export function renderReviewPage(input: ReviewPageInput): string {
@@ -219,7 +247,7 @@ export function renderReviewPage(input: ReviewPageInput): string {
     const approve = showApprove
       ? '<button type="submit" name="decision" value="approve">Approve</button>'
       : ''
-    actions = `<form class="actions" method="post" action="/review/${encodeURIComponent(input.bundleId)}/decide">${approve}<button class="destructive" type="submit" name="decision" value="reject">Reject</button></form>`
+    actions = `<form class="actions" method="post" action="/review/${encodeURIComponent(input.bundleId)}/decide"><div class="field"><label for="decision-comment">Comment for the author (optional)</label><textarea id="decision-comment" name="comment" maxlength="1000" rows="3"></textarea></div>${approve}<button class="destructive" type="submit" name="decision" value="reject">Reject</button></form>`
   }
   const publishedLink = input.channel?.status === 'sent' && input.channel.url
     ? `<a class="published-link" href="${escapeHtml(input.channel.url)}">View published post</a>`
@@ -248,13 +276,67 @@ export function renderReviewPage(input: ReviewPageInput): string {
   const body = `
 <main>
 ${brandHeader()}
+${navigation('posts')}
 <h1>Review</h1>
 <div class="meta-row">${statusChip(input.state)}<span aria-hidden="true">·</span><span class="meta tabular">${escapeHtml(input.scheduledLabel)}</span></div>
+${input.authorMessage ? `<p class="meta">${escapeHtml(input.authorMessage)}</p>` : ''}
+${input.decisionComment ? `<section class="card comment" aria-label="Approver comment"><p class="meta">Comment from the approver</p><p class="comment-text">${escapeHtml(input.decisionComment)}</p></section>` : ''}
 ${lock}
-<section class="card preview"><div class="text">${escapeHtml(input.text)}</div></section>
+<section class="card preview"><div class="text">${escapeHtml(input.text)}</div>${input.imageSha256 ? `<img src="/media/${escapeHtml(input.imageSha256)}" alt="Attached image">` : ''}</section>
 ${renderChecks(input.recorded)}
 ${channel}
 ${actions}
 </main>`
   return page('Review', body)
+}
+
+export type PostListItem = {
+  bundleId: string
+  state: string
+  text: string
+  scheduledLabel: string
+  channel: { postId: string; status: string; url: string | null } | null
+  imageSha256: string | null
+  authorMessage: string
+  decisionComment: string | null
+}
+
+export function authorStatusMessage(state: string, channelStatus: string | null): string {
+  if (state === 'submitted') return 'Waiting for approval.'
+  if (state === 'rejected') return 'Rejected by an approver.'
+  if (state === 'retracted') return 'Withdrawn.'
+  if (state === 'approved') {
+    const messages: Record<string, string> = {
+      pending: 'Approved. Goes out at the scheduled time.',
+      'in-flight': 'Sending now.',
+      sent: 'Published on X.',
+      failed: 'Sending failed. An approver can retry.',
+      uncertain: 'Unclear whether X received it. An approver checks it.'
+    }
+    return messages[channelStatus ?? ''] ?? 'Approved.'
+  }
+  return ''
+}
+
+export function truncatePostText(text: string): string {
+  const characters = Array.from(text)
+  if (characters.length <= 120) return text
+
+  const excerpt = characters.slice(0, 120)
+  let boundary = -1
+  for (let index = excerpt.length - 1; index >= 0; index -= 1) {
+    if (/\s/u.test(excerpt[index])) {
+      boundary = index
+      break
+    }
+  }
+  const shortened = (boundary > 0 ? excerpt.slice(0, boundary) : excerpt).join('').trimEnd()
+  return `${shortened}…`
+}
+
+export function renderPostsPage(input: { posts: PostListItem[]; author: boolean }): string {
+  const content = input.posts.length === 0
+    ? `<section class="card"><p>No posts yet.</p>${input.author ? '<a href="/">Write a post</a>' : ''}</section>`
+    : `<div class="posts">${input.posts.map((post) => `<article class="card post-card"><div class="meta-row">${statusChip(post.state)}${post.channel ? statusChip(post.channel.status) : ''}<span class="meta tabular">${escapeHtml(post.scheduledLabel)}</span></div><p>${escapeHtml(truncatePostText(post.text))}</p>${post.imageSha256 ? '<p class="meta">Image attached</p>' : ''}<p>${escapeHtml(post.authorMessage)}</p>${post.decisionComment ? `<p class="comment-text">Comment: ${escapeHtml(truncatePostText(post.decisionComment))}</p>` : ''}${post.channel?.status === 'sent' && post.channel.url ? `<a href="${escapeHtml(post.channel.url)}">View on X</a> · ` : ''}<a href="/review/${encodeURIComponent(post.bundleId)}">Open</a></article>`).join('')}</div>`
+  return page('Posts', `<main>${brandHeader()}${navigation('posts')}<h1>Posts</h1>${content}</main>`)
 }

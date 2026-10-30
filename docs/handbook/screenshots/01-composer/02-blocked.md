@@ -1,3 +1,3 @@
 # Submission blocked by a review finding
 
-The form retains the example post and scheduled time. A warning says Blocking review finding. The checks show “Forbidden claim: guaranteed returns”, followed by the review scope. Edit the text and submit again. A blocking finding prevents submission and does not create a review entry.
+This screen uses the server response with JavaScript disabled. The page shows the Outbox brand and New post and Posts navigation. The form retains “Everyone who joins this week gets guaranteed returns.” and the scheduled date, hour, and five-minute minute in Europe/Zurich. The image field shows the “Choose File” button and “No file chosen”. A cross icon precedes “Blocking review finding.” The Submit for approval button remains available. The preview repeats the post, its character count, and cost hint, with no image symbol. A cross icon also precedes “Forbidden claim: guaranteed returns” in the review card.

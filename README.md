@@ -82,7 +82,8 @@ Node 22, no frontend bundler. SQLite WAL on durable storage.
 
 ### Composer (phase 1)
 
-- Plaintext, one PNG/JPEG ≤ 5 MiB, `datetime-local` as **Europe/Zurich** wall time (server parses IANA `Europe/Zurich`, not the browser zone).
+- Plaintext, one optional PNG/JPEG ≤ 5 MiB, date plus hour and 5-minute minute choices as **Europe/Zurich** wall time (server parses IANA `Europe/Zurich`, not the browser zone).
+- The composer checks text as it is typed and shows a Posts overview for authors and approvers.
 - X only.
 - Preview: text, optional image, character count, X pay-per-use cost hint (post 0.015 USD, post with URL 0.200 USD).
 - Blocking review → submit 409.
@@ -122,7 +123,7 @@ sequenceDiagram
   P->>B: POST /api/submit Cookie
   B->>API: GET /v1/auth/introspect/outbox Bearer
   B->>B: review rules.json; create bundle
-  Q->>B: POST /review/:id/decide {decision: approve or reject} Bearer
+  Q->>B: POST /review/:id/decide {decision: approve or reject, comment?} Bearer
   B->>API: GET /v1/auth/introspect/admin Bearer
   alt approve
     B->>B: CAS submitted to approved; queue in same tx
@@ -131,6 +132,10 @@ sequenceDiagram
   end
   opt queued and due
     Note over B,X: Ticker, never Decide
+    opt image attached
+      B->>X: POST /2/media/upload
+      X-->>B: media id or error (failed, no tweet)
+    end
     B->>X: POST /2/tweets OAuth
     X-->>B: id or error
     B->>B: sent / failed / uncertain
@@ -157,9 +162,10 @@ Channel status: `pending | in-flight | sent | failed | uncertain`. `PublishResul
 ### X (phase 1)
 
 - OAuth 2.0 user token against `api.x.com`.
-- Scopes: `tweet.write`, `users.read`, `offline.access`, plus media upload (`media.write` or the documented scope for chunked `POST /2/media/upload`).
-- `POST /2/tweets`; media chunked `POST /2/media/upload`; refresh `POST /2/oauth2/token`.
+- Scopes: `tweet.write`, `users.read`, `offline.access`, and `media.write` for media upload.
+- One-shot `POST /2/media/upload` (`media_category=tweet_image`) before `POST /2/tweets`; refresh `POST /2/oauth2/token`.
 - One refresh on HTTP 401, never a second. Failed refresh **after dispatch** (tweet call already sent) → CAS `in-flight → uncertain` plus `needs-login` alert, no loop. Failed refresh **before dispatch** → `failed` (retry allowed).
+- Any media upload failure occurs before the tweet request, so it is `failed` and no tweet request is sent.
 - No auto-retry after an accepted `POST /2/tweets`.
 - Boot probe: `GET /2/users/me` username, strip a leading `@` on **both** sides, compare to configured handle. Mismatch → `probes.x=bad`, no send.
 - Dev uses a **test** X account, not the brand account. Client id is config; client secret and refresh token are secrets.
@@ -168,7 +174,7 @@ Channel status: `pending | in-flight | sent | failed | uncertain`. `PublishResul
 
 Phase 1: **one** brand, X only: **21 gifts**. The brand slug is configuration (`BRAND`), the pack lives at `content/<brand>/` **in the image**. `rules.json` is not part of this repository; the build adds it from a private source. Missing `rules.json` → submit 409 and health `ok: false`.
 
-Blocking: forbidden claims, MiCAR-unsafe, provisional without qualifier. Hints: emoji, sentence length, X character count. No LLM. Pack updates = new image.
+Blocking: forbidden claims, MiCAR-unsafe wording, and provisional parameters without a qualifier. No LLM. Pack updates = new image.
 
 ---
 
@@ -185,13 +191,14 @@ Blocking: forbidden claims, MiCAR-unsafe, provisional without qualifier. Hints: 
 | Route | Role | Effect |
 |---|---|---|
 | `GET /api/me` | OUTBOX or ADMIN | `{ account, user, role }` from payload |
-| `POST /api/drafts` | OUTBOX | text, image, scheduledAt (Zurich) |
 | `POST /api/review` | OUTBOX | findings |
 | `POST /api/submit` | OUTBOX | bundle; 409 on blocking / past time / bad image |
 | `GET /api/posts` | Admin → all; else Outbox → `authoredBy.account === payload.account`; else 403 | status list |
 | `POST /api/bundles/:id/retract` | OUTBOX, authoredBy | Phase 1: one entry per bundle. 409 unless every entry is `submitted`; then CAS all to `retracted` |
 | `GET /review/:id` | same visibility as `GET /api/posts` | `:id` is the **bundle** id. GET, no side effect; no token in the query |
-| `POST /review/:id/decide` | ADMIN | `:id` is the bundle id. Body `{ decision: "approve"\|"reject" }` for that bundle's single entry (phase 1). CAS `submitted → approved\|rejected`. Queue insert **only** on `approve`, same transaction. Retract vs decide: one winner. Repeat 409. |
+| `GET /posts` | OUTBOX or ADMIN | HTML status overview; authors see their own, approvers see all |
+| `GET /media/:sha256` | OUTBOX or ADMIN | Image bytes only when a visible entry references the image |
+| `POST /review/:id/decide` | ADMIN | `:id` is the bundle id. Body `{ decision: "approve"\|"reject", comment?: string }` for that bundle's single entry (phase 1). The optional comment is trimmed, limited to 1000 characters, stored as `decisionComment`, and shown to everyone who can see the entry on Review and Posts and in the JSON post views. CAS `submitted → approved\|rejected`. Queue insert **only** on `approve`, same transaction. Retract vs decide: one winner. Repeat 409. |
 | `POST /api/posts/:id/retry` | ADMIN | CAS `WHERE id=? AND status='failed'` → `pending`; unknown id 404, else 409 |
 | `POST /api/posts/:id/resolve-uncertain` | ADMIN | `{ resolution: "sent"\|"failed", url? }`. CAS `WHERE id=? AND status='uncertain'`; unknown id 404, else 409 |
 
@@ -229,11 +236,11 @@ Environment variables, read once at start. A missing or invalid required variabl
 
 ## Data model
 
-SQLite WAL. Tables: drafts, bundles, entries, scheduled_posts, publish_results, audit, media, x_credentials (the X OAuth token pair; the refresh token is stored at rest because it rotates).
+SQLite WAL. Tables: bundles, entries, scheduled_posts, publish_results, audit, media, x_credentials (the X OAuth token pair; the refresh token is stored at rest because it rotates). There is no `drafts` table.
 
-Phase 1: **one entry per bundle**. `GET`/`POST /review/:id` uses the bundle id.
+Phase 1: **one entry per bundle**. `GET`/`POST /review/:id` uses the bundle id. `media` stores deduplicated PNG/JPEG bytes by SHA-256.
 
-Bundles and scheduled_posts store `authoredByUser` + `authoredByAccount` (JWT `user` / `account` at submit). Entry state: `submitted | retracted | approved | rejected`. Submit creates `submitted`. Retract/decide are compare-and-set `WHERE state='submitted'` in `BEGIN IMMEDIATE`. Retract 409 unless every entry on the bundle is still `submitted`. `approved` writes `scheduled_posts` with `status='pending'` and `channel='x'` in the same transaction. `decidedByUser` / `decidedByAccount` only on approve/reject.
+Bundles and scheduled_posts store `authoredByUser` + `authoredByAccount` (JWT `user` / `account` at submit). Entry state: `submitted | retracted | approved | rejected`. Submit creates `submitted`. Retract/decide are compare-and-set `WHERE state='submitted'` in `BEGIN IMMEDIATE`. Retract 409 unless every entry on the bundle is still `submitted`. `approved` writes `scheduled_posts` with `status='pending'` and `channel='x'` in the same transaction. `decidedByUser` / `decidedByAccount` and optional `decisionComment` are stored on approve/reject.
 
 ---
 

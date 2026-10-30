@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url'
 import { afterEach, describe, expect, it } from 'vitest'
 import { openDatabase, type SqliteDatabase } from './db'
 import { submitSubmission } from './entries'
-import { REVIEW_SCOPE } from './findings'
+import { imageSha256 } from './content-hash'
 import type { Identity, Introspect } from './identity'
 import {
   createOutboxServer,
@@ -110,6 +110,7 @@ async function start(
       join(packRoot, 'content', 'dfx', 'rules.json'),
       JSON.stringify({
         topic: 'dfx',
+        maxEmoji: 0,
         forbiddenClaims: ['\\btrustless\\b'],
         micarUnsafe: [],
         provisionalParameters: []
@@ -216,18 +217,156 @@ function auditReasons(db: SqliteDatabase): string[] {
   }>).map((row) => row.reason ?? '')
 }
 
-/** Independent clauses — a single word in the caption cannot satisfy this. */
-function expectReviewScopeMeaning(text: string): void {
-  expect(text).toMatch(
-    /Checked:[\s\S]*forbidden[\s\S]*MiCAR[\s\S]*provisional[\s\S]*listed[\s\S]*emoji[\s\S]*sentence[\s\S]*character/i
-  )
-  expect(text).toMatch(
-    /Not checked:[\s\S]*numbers[\s\S]*names[\s\S]*claims[\s\S]*factually true[\s\S]*author/i
-  )
-  expect(text).not.toMatch(/Not checked:[\s\S]*forbidden/i)
-}
+describe('GET / composer', () => {
+  it('preselects the next Zurich date, hour, and minute', async () => {
+    const h = await start()
+    const response = await call(h.port, '/', { token: TOKEN_A })
+
+    expect(response.status).toBe(200)
+    expect(response.text).toContain('id="scheduledDate" name="scheduledDate" type="date" required value="2023-01-01"')
+    expect(response.text.match(/<option value="01" selected>01<\/option>/g)).toHaveLength(1)
+    expect(response.text.match(/<option value="10" selected>10<\/option>/g)).toHaveLength(1)
+  })
+})
 
 describe('POST /api/submit', () => {
+  it('rejects seconds that are not zero and accepts a five-minute datetime with zero seconds', async () => {
+    const h = await start()
+    const withSeconds = await submitJson(h.port, TOKEN_A, {
+      text: CLEAN,
+      scheduledAt: '2024-07-15T12:05:30'
+    })
+    expect(withSeconds.status).toBe(400)
+    expect(withSeconds.json).toMatchObject({
+      reason: 'invalid-request',
+      detail: 'Scheduled time must be on a 5-minute step.'
+    })
+
+    const zeroSeconds = await submitJson(h.port, TOKEN_A, {
+      text: CLEAN,
+      scheduledAt: '2024-07-15T12:05:00'
+    })
+    expect(zeroSeconds.status).toBe(200)
+    expect(zeroSeconds.json).toMatchObject({ ok: true })
+  })
+
+  it('requires 5-minute steps for datetime and date/hour/minute inputs', async () => {
+    const h = await start()
+    const json = await submitJson(h.port, TOKEN_A, { text: CLEAN, scheduledAt: '2024-07-15T12:01' })
+    expect(json.status).toBe(400)
+    expect(json.json).toMatchObject({ reason: 'invalid-request', detail: 'Scheduled time must be on a 5-minute step.' })
+    const form = await call(h.port, '/api/submit', {
+      method: 'POST', token: TOKEN_A,
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ text: CLEAN, scheduledDate: '2024-07-15', scheduledHour: '12', scheduledMinute: '01' }).toString()
+    })
+    expect(form.status).toBe(400)
+    expect(form.text).toContain('Scheduled time must be on a 5-minute step.')
+    expect(entryCount(h.db)).toBe(0)
+  })
+
+  it('deduplicates identical images across submissions and stores a different image separately', async () => {
+    const h = await start()
+    const bytes = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10, 1])
+    const submitImage = async (minute: string, image: Uint8Array) => {
+      const form = new FormData()
+      form.set('text', CLEAN)
+      form.set('scheduledDate', '2024-07-15')
+      form.set('scheduledHour', '12')
+      form.set('scheduledMinute', minute)
+      form.set('image', new Blob([image], { type: 'application/octet-stream' }), 'chosen.bin')
+      const response = await call(h.port, '/api/submit', {
+        method: 'POST', token: TOKEN_A, headers: { accept: 'application/json' }, body: form
+      })
+      expect(response.status).toBe(200)
+      const body = response.json as { entryId: string }
+      return (h.db.prepare('SELECT imageSha256 FROM entries WHERE id = ?').get(body.entryId) as { imageSha256: string }).imageSha256
+    }
+    const firstSha = await submitImage('05', bytes)
+    const duplicateSha = await submitImage('10', bytes)
+    const otherSha = await submitImage('15', new Uint8Array([...bytes, 2]))
+
+    expect(firstSha).toBe(imageSha256(bytes))
+    expect(duplicateSha).toBe(firstSha)
+    expect(otherSha).not.toBe(firstSha)
+    expect(h.db.prepare('SELECT COUNT(*) AS n FROM media').get()).toEqual({ n: 2 })
+    expect(h.db.prepare('SELECT mime FROM media WHERE sha256 = ?').get(firstSha)).toEqual({ mime: 'image/png' })
+  })
+
+  it('rejects multipart text fields larger than the body limit', async () => {
+    const h = await start()
+    const form = new FormData()
+    form.set('text', 'x'.repeat(1_000_001))
+    const response = await call(h.port, '/api/submit', {
+      method: 'POST', token: TOKEN_A, headers: { accept: 'application/json' }, body: form
+    })
+    expect(response.status).toBe(413)
+  })
+
+  it('accepts JPEG bytes and treats an empty file input as no image', async () => {
+    const h = await start()
+    const submitForm = async (image: Blob, filename: string) => {
+      const form = new FormData()
+      form.set('text', CLEAN)
+      form.set('scheduledDate', '2024-07-15')
+      form.set('scheduledHour', '12')
+      form.set('scheduledMinute', '10')
+      form.set('image', image, filename)
+      return call(h.port, '/api/submit', { method: 'POST', token: TOKEN_A, headers: { accept: 'application/json' }, body: form })
+    }
+    const jpegBytes = new Uint8Array([0xff, 0xd8, 0xff, 1])
+    const jpeg = await submitForm(new Blob([jpegBytes], { type: 'image/png' }), 'reported-png.png')
+    expect(jpeg.status).toBe(200)
+    const jpegBody = jpeg.json as { entryId: string }
+    const jpegEntry = h.db.prepare('SELECT imageSha256 FROM entries WHERE id = ?').get(jpegBody.entryId) as { imageSha256: string }
+    expect(h.db.prepare('SELECT mime FROM media WHERE sha256 = ?').get(jpegEntry.imageSha256)).toEqual({ mime: 'image/jpeg' })
+
+    const empty = await submitForm(new Blob([], { type: 'image/png' }), 'empty.png')
+    expect(empty.status).toBe(200)
+    const emptyBody = empty.json as { entryId: string }
+    expect(h.db.prepare('SELECT imageSha256 FROM entries WHERE id = ?').get(emptyBody.entryId)).toEqual({ imageSha256: null })
+  })
+
+  it('rejects a non-PNG/JPEG signature', async () => {
+    const h = await start()
+    const invalid = new FormData()
+    invalid.set('text', CLEAN)
+    invalid.set('scheduledDate', '2024-07-15')
+    invalid.set('scheduledHour', '12')
+    invalid.set('scheduledMinute', '05')
+    invalid.set('image', new Blob(['not an image'], { type: 'image/png' }), 'fake.png')
+    const bad = await call(h.port, '/api/submit', { method: 'POST', token: TOKEN_A, headers: { accept: 'application/json' }, body: invalid })
+    expect(bad.status).toBe(409)
+    expect(bad.json).toMatchObject({ reason: 'bad-image', detail: 'Image must be a PNG or JPEG up to 5 MB.' })
+
+    expect(entryCount(h.db)).toBe(0)
+  })
+
+  it('enforces the image size limit for correctly signed PNG files', async () => {
+    const h = await start()
+    const submitPng = async (size: number) => {
+      const bytes = new Uint8Array(size)
+      bytes.set([137, 80, 78, 71, 13, 10, 26, 10])
+      const form = new FormData()
+      form.set('text', CLEAN)
+      form.set('scheduledDate', '2024-07-15')
+      form.set('scheduledHour', '12')
+      form.set('scheduledMinute', '05')
+      form.set('image', new Blob([bytes], { type: 'image/png' }), 'image.png')
+      return call(h.port, '/api/submit', {
+        method: 'POST', token: TOKEN_A,
+        headers: { accept: 'application/json' }, body: form
+      })
+    }
+
+    const tooLarge = await submitPng(5 * 1024 * 1024 + 1)
+    expect(tooLarge.status).toBe(409)
+    expect(tooLarge.json).toMatchObject({ reason: 'bad-image' })
+    const atLimit = await submitPng(5 * 1024 * 1024)
+    expect(atLimit.status).toBe(200)
+    expect(entryCount(h.db)).toBe(1)
+  })
+
   it('rejects a JSON field that is not a string and writes no entry', async () => {
     const h = await start()
     const res = await call(h.port, '/api/submit', {
@@ -248,6 +387,25 @@ describe('POST /api/submit', () => {
     expect(res.status).toBe(409)
     expect(res.json).toMatchObject({ ok: false, reason: 'blocking-review' })
     expect(entryCount(h.db)).toBe(0)
+  })
+
+  it('renders a blocking finding page with an enabled submit button for an HTML form submit', async () => {
+    const h = await start()
+    const res = await call(h.port, '/api/submit', {
+      method: 'POST',
+      token: TOKEN_A,
+      headers: {
+        accept: 'text/html',
+        'content-type': 'application/x-www-form-urlencoded'
+      },
+      body: new URLSearchParams({ text: BLOCKING, scheduledAt: FUTURE_LOCAL }).toString()
+    })
+
+    expect(res.status).toBe(409)
+    expect(res.text).toContain('Blocking review finding.')
+    const submitButton = res.text.match(/<button id="submit-button"[^>]*>/)?.[0]
+    expect(submitButton).toBeDefined()
+    expect(submitButton).not.toMatch(/\sdisabled(?:\s|=|>)/)
   })
 
   it('returns 409 when the scheduled time is already past', async () => {
@@ -275,17 +433,23 @@ describe('POST /api/submit', () => {
 
   it('does not present a missing pack as an empty review result', async () => {
     const h = await start({ pack: false })
+    const form = new FormData()
+    form.set('text', CLEAN)
+    form.set('scheduledAt', FUTURE_LOCAL)
+    form.set('image', new Blob([new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10])], { type: 'image/png' }), 'image.png')
     const res = await call(h.port, '/api/submit', {
       method: 'POST',
       token: TOKEN_A,
-      headers: { 'content-type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({ text: CLEAN, scheduledAt: FUTURE_LOCAL }).toString()
+      headers: { accept: 'text/html' },
+      body: form
     })
     expect(res.status).toBe(409)
     expect(res.text).toContain('No usable review check is recorded.')
-    expect(res.text).not.toContain('No blocking findings and no hints.')
+    expect(res.text).not.toContain('No blocking findings.')
     expect(res.text).toContain('Review pack is missing.')
-    expectReviewScopeMeaning(res.text)
+    expect(res.text).not.toContain('Checked:')
+    expect(res.text).not.toContain('Not checked:')
+    expect(res.text).toContain('Choose the image again — it was not kept.')
     expect(entryCount(h.db)).toBe(0)
   })
 
@@ -312,7 +476,8 @@ describe('POST /api/submit', () => {
     const page = await call(h.port, `/review/${created.bundleId}`, { token: TOKEN_A })
     expect(page.status).toBe(200)
     expect(page.text).toContain(CLEAN)
-    expectReviewScopeMeaning(page.text)
+    expect(page.text).not.toContain('Checked:')
+    expect(page.text).not.toContain('Not checked:')
     expect(page.text).toContain('Europe/Zurich')
     expect(page.text).not.toContain(TOKEN_A)
   })
@@ -333,8 +498,9 @@ describe('GET /review/:id', () => {
     const page = await call(h.port, `/review/${created.bundleId}`, { token: TOKEN_ADMIN })
     expect(page.status).toBe(200)
     expect(page.text).toContain('No usable review check is recorded.')
-    expect(page.text).not.toContain('No blocking findings and no hints.')
-    expectReviewScopeMeaning(page.text)
+    expect(page.text).not.toContain('No blocking findings.')
+    expect(page.text).not.toContain('Checked:')
+    expect(page.text).not.toContain('Not checked:')
     expect(page.text).toContain(
       'No review check is recorded, so this entry cannot be approved.'
     )
@@ -342,6 +508,130 @@ describe('GET /review/:id', () => {
 })
 
 describe('POST /review/:id/decide', () => {
+  it('stores a rejection comment and shows it only to the author and approver', async () => {
+    const h = await start()
+    const created = (await submitJson(h.port, TOKEN_A, { text: CLEAN, scheduledAt: FUTURE_LOCAL }))
+      .json as { bundleId: string; entryId: string }
+    const approverPage = await call(h.port, `/review/${created.bundleId}`, { token: TOKEN_ADMIN })
+    const authorBefore = await call(h.port, `/review/${created.bundleId}`, { token: TOKEN_A })
+    expect(approverPage.text).toContain('Comment for the author (optional)')
+    expect(authorBefore.text).not.toContain('decision-comment')
+
+    const comment = '  Please name the date of the event.  '
+    const decided = await call(h.port, `/review/${created.bundleId}/decide`, {
+      method: 'POST', token: TOKEN_ADMIN,
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ decision: 'reject', comment }).toString()
+    })
+    expect(decided.status).toBe(200)
+    expect(decided.text).toContain('Rejected.')
+    expect(h.db.prepare('SELECT state, decisionComment FROM entries WHERE id = ?').get(created.entryId))
+      .toEqual({ state: 'rejected', decisionComment: 'Please name the date of the event.' })
+
+    const authorReview = await call(h.port, `/review/${created.bundleId}`, { token: TOKEN_A })
+    const approverAfter = await call(h.port, `/review/${created.bundleId}`, { token: TOKEN_ADMIN })
+    const authorPosts = await call(h.port, '/posts', { token: TOKEN_A })
+    const postsJson = await call(h.port, '/api/posts', { token: TOKEN_A })
+    expect(authorReview.text).toContain('Comment from the approver')
+    expect(authorReview.text).toContain('Please name the date of the event.')
+    expect(approverAfter.text).toContain('Please name the date of the event.')
+    expect(approverAfter.text).not.toContain('decision-comment')
+    expect(authorPosts.text).toContain('Comment: Please name the date of the event.')
+    expect(postsJson.json).toMatchObject({ posts: [{ decisionComment: 'Please name the date of the event.' }] })
+
+    const second = await call(h.port, `/review/${created.bundleId}/decide`, {
+      method: 'POST', token: TOKEN_ADMIN,
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ decision: 'reject', comment: 'Changed after decision.' }).toString()
+    })
+    expect(second.status).toBe(409)
+    expect((h.db.prepare('SELECT decisionComment FROM entries WHERE id = ?').get(created.entryId) as { decisionComment: string }).decisionComment)
+      .toBe('Please name the date of the event.')
+
+    expect((await call(h.port, `/review/${created.bundleId}`, { token: TOKEN_B })).status).toBe(403)
+    expect((await call(h.port, '/api/posts', { token: TOKEN_B })).json).toEqual({ posts: [] })
+  })
+
+  it('stores an approval comment and still queues the entry', async () => {
+    const h = await start()
+    const created = (await submitJson(h.port, TOKEN_A, { text: CLEAN, scheduledAt: FUTURE_LOCAL }))
+      .json as { bundleId: string; entryId: string }
+    const decided = await call(h.port, `/review/${created.bundleId}/decide`, {
+      method: 'POST', token: TOKEN_ADMIN,
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ decision: 'approve', comment: 'Keep the reference link current.' }).toString()
+    })
+    expect(decided.status).toBe(200)
+    expect(decided.text).toContain('Approved and queued.')
+    expect(queueFor(h.db, created.entryId)).toEqual([{ channel: 'x', status: 'pending' }])
+    expect((await call(h.port, `/review/${created.bundleId}`, { token: TOKEN_A })).text)
+      .toContain('Keep the reference link current.')
+    expect((await call(h.port, '/posts', { token: TOKEN_A })).text)
+      .toContain('Comment: Keep the reference link current.')
+  })
+
+  it('escapes comments and treats whitespace-only comments as null', async () => {
+    const h = await start()
+    const escapedEntry = (await submitJson(h.port, TOKEN_A, { text: CLEAN, scheduledAt: FUTURE_LOCAL }))
+      .json as { bundleId: string; entryId: string }
+    const comment = '<script>alert(1)</script>'
+    await call(h.port, `/review/${escapedEntry.bundleId}/decide`, {
+      method: 'POST', token: TOKEN_ADMIN,
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ decision: 'reject', comment })
+    })
+    const reviewPage = await call(h.port, `/review/${escapedEntry.bundleId}`, { token: TOKEN_A })
+    expect(reviewPage.text).toContain('&lt;script&gt;alert(1)&lt;/script&gt;')
+    expect(reviewPage.text).not.toContain(comment)
+
+    const blankEntry = (await submitJson(h.port, TOKEN_A, { text: CLEAN, scheduledAt: FUTURE_LOCAL }))
+      .json as { bundleId: string; entryId: string }
+    const blank = await call(h.port, `/review/${blankEntry.bundleId}/decide`, {
+      method: 'POST', token: TOKEN_ADMIN,
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ decision: 'reject', comment: '   \n  ' })
+    })
+    expect(blank.status).toBe(200)
+    expect((h.db.prepare('SELECT decisionComment FROM entries WHERE id = ?').get(blankEntry.entryId) as { decisionComment: string | null }).decisionComment)
+      .toBeNull()
+  })
+
+  it('validates trimmed comment length and JSON types before deciding', async () => {
+    const h = await start()
+    const created = (await submitJson(h.port, TOKEN_A, { text: CLEAN, scheduledAt: FUTURE_LOCAL }))
+      .json as { bundleId: string; entryId: string }
+    const tooLong = await call(h.port, `/review/${created.bundleId}/decide`, {
+      method: 'POST', token: TOKEN_ADMIN,
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ decision: 'approve', comment: `${'😀'.repeat(1000)}x` })
+    })
+    expect(tooLong.status).toBe(400)
+    expect(tooLong.json).toMatchObject({
+      ok: false, reason: 'invalid-request', detail: 'Comment must be at most 1000 characters.'
+    })
+    expect((h.db.prepare('SELECT state FROM entries WHERE id = ?').get(created.entryId) as { state: string }).state)
+      .toBe('submitted')
+
+    const numeric = await call(h.port, `/review/${created.bundleId}/decide`, {
+      method: 'POST', token: TOKEN_ADMIN,
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ decision: 'approve', comment: 5 })
+    })
+    expect(numeric.status).toBe(400)
+    expect((h.db.prepare('SELECT state FROM entries WHERE id = ?').get(created.entryId) as { state: string }).state)
+      .toBe('submitted')
+
+    const maximum = '😀'.repeat(1000)
+    const accepted = await call(h.port, `/review/${created.bundleId}/decide`, {
+      method: 'POST', token: TOKEN_ADMIN,
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ decision: 'approve', comment: maximum })
+    })
+    expect(accepted.status).toBe(200)
+    expect((h.db.prepare('SELECT decisionComment FROM entries WHERE id = ?').get(created.entryId) as { decisionComment: string }).decisionComment)
+      .toBe(maximum)
+  })
+
   it('does not approve when introspect returns OUTBOX for an ADMIN route', async () => {
     const permissive: Introspect = async (token) => {
       const person = PEOPLE[token]
@@ -534,7 +824,8 @@ describe('no publish-now', () => {
     const home = await call(h.port, '/', { token: TOKEN_A })
     expect(home.status).toBe(200)
     expect(home.text).toContain('Submit for approval')
-    expectReviewScopeMeaning(home.text)
+    expect(home.text).not.toContain('Checked:')
+    expect(home.text).not.toContain('Not checked:')
     expect(home.text).not.toContain('Publish now')
     expect(home.text).not.toContain('/api/publish')
     expect(home.text).not.toContain('/api/schedule')
@@ -1100,6 +1391,59 @@ describe('GET /api/me', () => {
   })
 })
 
+describe('GET /posts', () => {
+  it('shows only the author’s posts to OUTBOX and every post to ADMIN', async () => {
+    const h = await start()
+    const own = submitSubmission(h.db, { text: 'own author post', scheduledAt: SUMMER_EPOCH, checks: { blocking: [] }, actor: { user: 'user-a', account: 'account-a' }, now: NOW })
+    const other = submitSubmission(h.db, { text: 'other author post', scheduledAt: SUMMER_EPOCH + 300_000, checks: { blocking: [] }, actor: { user: 'user-b', account: 'account-b' }, now: NOW })
+    expect(own.ok && other.ok).toBe(true)
+    const author = await call(h.port, '/posts', { token: TOKEN_A })
+    expect(author.status).toBe(200)
+    expect(author.text).toContain('own author post')
+    expect(author.text).not.toContain('other author post')
+    expect(author.text).toContain('Waiting for approval.')
+    expect(author.text).toContain('aria-current="page">Posts')
+    const admin = await call(h.port, '/posts', { token: TOKEN_ADMIN })
+    expect(admin.text).toContain('own author post')
+    expect(admin.text).toContain('other author post')
+    expect(admin.text.indexOf('other author post')).toBeLessThan(admin.text.indexOf('own author post'))
+    const api = await call(h.port, '/api/posts', { token: TOKEN_ADMIN })
+    const posts = (api.json as { posts: Array<{ text: string; scheduledAt: number }> }).posts
+    expect(posts.map((post) => post.text)).toEqual(['own author post', 'other author post'])
+    expect(posts.map((post) => post.scheduledAt)).toEqual([SUMMER_EPOCH, SUMMER_EPOCH + 300_000])
+  })
+
+  it('shows the correct empty state for authors and approvers', async () => {
+    const h = await start()
+    const author = await call(h.port, '/posts', { token: TOKEN_A })
+    const admin = await call(h.port, '/posts', { token: TOKEN_ADMIN })
+    expect(author.text).toContain('No posts yet.')
+    expect(author.text).toContain('Write a post')
+    expect(admin.text).toContain('No posts yet.')
+    expect(admin.text).not.toContain('Write a post')
+  })
+})
+
+describe('GET /media/:sha256', () => {
+  it('serves image bytes only to an identity that can see a referencing entry', async () => {
+    const h = await start()
+    const bytes = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, 1])
+    const created = submitSubmission(h.db, { text: CLEAN, scheduledAt: SUMMER_EPOCH, imageBytes: bytes, checks: { blocking: [] }, actor: { user: 'user-a', account: 'account-a' }, now: NOW })
+    if (!created.ok) throw new Error('expected submission')
+    const sha = imageSha256(bytes)
+    const author = await fetch(`http://127.0.0.1:${h.port}/media/${sha}`, { headers: { authorization: `Bearer ${TOKEN_A}` } })
+    expect(author.status).toBe(200)
+    expect(Buffer.from(await author.arrayBuffer()).equals(bytes)).toBe(true)
+    expect(author.headers.get('content-type')).toBe('image/png')
+    expect(author.headers.get('x-content-type-options')).toBe('nosniff')
+    expect(author.headers.get('cache-control')).toBe('private, no-store')
+    const other = await call(h.port, `/media/${sha}`, { token: TOKEN_B })
+    const unknown = await call(h.port, `/media/${'0'.repeat(64)}`, { token: TOKEN_A })
+    expect(other.status).toBe(404)
+    expect(unknown.status).toBe(404)
+  })
+})
+
 describe('POST /api/review', () => {
   it('returns findings and writes no entry', async () => {
     const h = await start()
@@ -1113,9 +1457,32 @@ describe('POST /api/review', () => {
     expect(res.json).toEqual({
       ok: true,
       blocking: ['Forbidden claim: trustless'],
-      hints: []
+      charCount: [...BLOCKING].length,
+      costHint: 'X pay-per-use: 0.015 USD per post, 0.200 USD if the post contains a URL.'
     })
     expect(entryCount(h.db)).toBe(0)
+  })
+
+  it('ignores emoji, long sentences, and text over 280 characters', async () => {
+    const h = await start()
+    const longText = `😀 ${Array.from({ length: 40 }, (_, index) => `word${index}`).join(' ')} ${'long '.repeat(60)}`
+    const res = await call(h.port, '/api/review', {
+      method: 'POST', token: TOKEN_A,
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ text: longText })
+    })
+    expect(res.status).toBe(200)
+    expect(res.json).toMatchObject({ ok: true, blocking: [], charCount: [...longText].length })
+    expect(res.json).not.toHaveProperty('hints')
+    expect(res.text).not.toContain('More than 0 emoji.')
+    expect(res.text).not.toContain('A sentence is longer than 35 words.')
+    expect(res.text).not.toContain(`Character count ${[...longText].length} exceeds 280.`)
+    const created = await submitJson(h.port, TOKEN_A, { text: longText, scheduledAt: FUTURE_LOCAL })
+    const bundleId = (created.json as { bundleId: string }).bundleId
+    const page = await call(h.port, `/review/${bundleId}`, { token: TOKEN_A })
+    expect(page.text).not.toContain('More than 0 emoji.')
+    expect(page.text).not.toContain('A sentence is longer than 35 words.')
+    expect(page.text).not.toContain('Character count')
   })
 })
 
@@ -1130,9 +1497,12 @@ describe('unreadable cookie', () => {
   })
 })
 
-describe('review scope caption', () => {
-  it('names the listed provisional check and withholds factual truth of numbers, names and claims', () => {
-    expectReviewScopeMeaning(REVIEW_SCOPE)
+describe('review check presentation', () => {
+  it('does not show a Checked scope line on the composer', async () => {
+    const h = await start()
+    const page = await call(h.port, '/', { token: TOKEN_A })
+    expect(page.text).toContain('Checks appear here as you type.')
+    expect(page.text).not.toContain('Checked:')
   })
 })
 
@@ -1164,5 +1534,18 @@ describe('font assets', () => {
     expect(response.status).toBe(200)
     expect(response.text).toContain('@font-face')
     expect(response.text).toContain('/assets/fonts/Inter-Regular.woff2')
+  })
+})
+
+describe('composer script and CSP', () => {
+  it('serves only the composer script asset and permits it through the exact CSP', async () => {
+    const h = await start()
+    const page = await call(h.port, '/', { token: TOKEN_A })
+    expect(page.headers.get('content-security-policy')).toBe("default-src 'none'; script-src 'self'; connect-src 'self'; img-src 'self' blob:; style-src 'unsafe-inline'; font-src 'self'; form-action 'self'; base-uri 'none'")
+    const script = await fetch(`http://127.0.0.1:${h.port}/assets/composer.js`)
+    expect(script.status).toBe(200)
+    expect(script.headers.get('content-type')).toBe('text/javascript; charset=utf-8')
+    expect(await script.text()).toBe(readFileSync(join(dirname(FONT_DIRECTORY), 'composer.js'), 'utf8'))
+    expect((await fetch(`http://127.0.0.1:${h.port}/assets/private.js`)).status).toBe(404)
   })
 })
