@@ -110,6 +110,7 @@ async function start(
       join(packRoot, 'content', 'dfx', 'rules.json'),
       JSON.stringify({
         topic: 'dfx',
+        maxEmoji: 0,
         forbiddenClaims: ['\\btrustless\\b'],
         micarUnsafe: [],
         provisionalParameters: []
@@ -444,7 +445,7 @@ describe('POST /api/submit', () => {
     })
     expect(res.status).toBe(409)
     expect(res.text).toContain('No usable review check is recorded.')
-    expect(res.text).not.toContain('No blocking findings and no hints.')
+    expect(res.text).not.toContain('No blocking findings.')
     expect(res.text).toContain('Review pack is missing.')
     expect(res.text).not.toContain('Checked:')
     expect(res.text).not.toContain('Not checked:')
@@ -497,7 +498,7 @@ describe('GET /review/:id', () => {
     const page = await call(h.port, `/review/${created.bundleId}`, { token: TOKEN_ADMIN })
     expect(page.status).toBe(200)
     expect(page.text).toContain('No usable review check is recorded.')
-    expect(page.text).not.toContain('No blocking findings and no hints.')
+    expect(page.text).not.toContain('No blocking findings.')
     expect(page.text).not.toContain('Checked:')
     expect(page.text).not.toContain('Not checked:')
     expect(page.text).toContain(
@@ -507,6 +508,130 @@ describe('GET /review/:id', () => {
 })
 
 describe('POST /review/:id/decide', () => {
+  it('stores a rejection comment and shows it only to the author and approver', async () => {
+    const h = await start()
+    const created = (await submitJson(h.port, TOKEN_A, { text: CLEAN, scheduledAt: FUTURE_LOCAL }))
+      .json as { bundleId: string; entryId: string }
+    const approverPage = await call(h.port, `/review/${created.bundleId}`, { token: TOKEN_ADMIN })
+    const authorBefore = await call(h.port, `/review/${created.bundleId}`, { token: TOKEN_A })
+    expect(approverPage.text).toContain('Comment for the author (optional)')
+    expect(authorBefore.text).not.toContain('decision-comment')
+
+    const comment = '  Please name the date of the event.  '
+    const decided = await call(h.port, `/review/${created.bundleId}/decide`, {
+      method: 'POST', token: TOKEN_ADMIN,
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ decision: 'reject', comment }).toString()
+    })
+    expect(decided.status).toBe(200)
+    expect(decided.text).toContain('Rejected.')
+    expect(h.db.prepare('SELECT state, decisionComment FROM entries WHERE id = ?').get(created.entryId))
+      .toEqual({ state: 'rejected', decisionComment: 'Please name the date of the event.' })
+
+    const authorReview = await call(h.port, `/review/${created.bundleId}`, { token: TOKEN_A })
+    const approverAfter = await call(h.port, `/review/${created.bundleId}`, { token: TOKEN_ADMIN })
+    const authorPosts = await call(h.port, '/posts', { token: TOKEN_A })
+    const postsJson = await call(h.port, '/api/posts', { token: TOKEN_A })
+    expect(authorReview.text).toContain('Comment from the approver')
+    expect(authorReview.text).toContain('Please name the date of the event.')
+    expect(approverAfter.text).toContain('Please name the date of the event.')
+    expect(approverAfter.text).not.toContain('decision-comment')
+    expect(authorPosts.text).toContain('Comment: Please name the date of the event.')
+    expect(postsJson.json).toMatchObject({ posts: [{ decisionComment: 'Please name the date of the event.' }] })
+
+    const second = await call(h.port, `/review/${created.bundleId}/decide`, {
+      method: 'POST', token: TOKEN_ADMIN,
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ decision: 'reject', comment: 'Changed after decision.' }).toString()
+    })
+    expect(second.status).toBe(409)
+    expect((h.db.prepare('SELECT decisionComment FROM entries WHERE id = ?').get(created.entryId) as { decisionComment: string }).decisionComment)
+      .toBe('Please name the date of the event.')
+
+    expect((await call(h.port, `/review/${created.bundleId}`, { token: TOKEN_B })).status).toBe(403)
+    expect((await call(h.port, '/api/posts', { token: TOKEN_B })).json).toEqual({ posts: [] })
+  })
+
+  it('stores an approval comment and still queues the entry', async () => {
+    const h = await start()
+    const created = (await submitJson(h.port, TOKEN_A, { text: CLEAN, scheduledAt: FUTURE_LOCAL }))
+      .json as { bundleId: string; entryId: string }
+    const decided = await call(h.port, `/review/${created.bundleId}/decide`, {
+      method: 'POST', token: TOKEN_ADMIN,
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ decision: 'approve', comment: 'Keep the reference link current.' }).toString()
+    })
+    expect(decided.status).toBe(200)
+    expect(decided.text).toContain('Approved and queued.')
+    expect(queueFor(h.db, created.entryId)).toEqual([{ channel: 'x', status: 'pending' }])
+    expect((await call(h.port, `/review/${created.bundleId}`, { token: TOKEN_A })).text)
+      .toContain('Keep the reference link current.')
+    expect((await call(h.port, '/posts', { token: TOKEN_A })).text)
+      .toContain('Comment: Keep the reference link current.')
+  })
+
+  it('escapes comments and treats whitespace-only comments as null', async () => {
+    const h = await start()
+    const escapedEntry = (await submitJson(h.port, TOKEN_A, { text: CLEAN, scheduledAt: FUTURE_LOCAL }))
+      .json as { bundleId: string; entryId: string }
+    const comment = '<script>alert(1)</script>'
+    await call(h.port, `/review/${escapedEntry.bundleId}/decide`, {
+      method: 'POST', token: TOKEN_ADMIN,
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ decision: 'reject', comment })
+    })
+    const reviewPage = await call(h.port, `/review/${escapedEntry.bundleId}`, { token: TOKEN_A })
+    expect(reviewPage.text).toContain('&lt;script&gt;alert(1)&lt;/script&gt;')
+    expect(reviewPage.text).not.toContain(comment)
+
+    const blankEntry = (await submitJson(h.port, TOKEN_A, { text: CLEAN, scheduledAt: FUTURE_LOCAL }))
+      .json as { bundleId: string; entryId: string }
+    const blank = await call(h.port, `/review/${blankEntry.bundleId}/decide`, {
+      method: 'POST', token: TOKEN_ADMIN,
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ decision: 'reject', comment: '   \n  ' })
+    })
+    expect(blank.status).toBe(200)
+    expect((h.db.prepare('SELECT decisionComment FROM entries WHERE id = ?').get(blankEntry.entryId) as { decisionComment: string | null }).decisionComment)
+      .toBeNull()
+  })
+
+  it('validates trimmed comment length and JSON types before deciding', async () => {
+    const h = await start()
+    const created = (await submitJson(h.port, TOKEN_A, { text: CLEAN, scheduledAt: FUTURE_LOCAL }))
+      .json as { bundleId: string; entryId: string }
+    const tooLong = await call(h.port, `/review/${created.bundleId}/decide`, {
+      method: 'POST', token: TOKEN_ADMIN,
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ decision: 'approve', comment: `${'😀'.repeat(1000)}x` })
+    })
+    expect(tooLong.status).toBe(400)
+    expect(tooLong.json).toMatchObject({
+      ok: false, reason: 'invalid-request', detail: 'Comment must be at most 1000 characters.'
+    })
+    expect((h.db.prepare('SELECT state FROM entries WHERE id = ?').get(created.entryId) as { state: string }).state)
+      .toBe('submitted')
+
+    const numeric = await call(h.port, `/review/${created.bundleId}/decide`, {
+      method: 'POST', token: TOKEN_ADMIN,
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ decision: 'approve', comment: 5 })
+    })
+    expect(numeric.status).toBe(400)
+    expect((h.db.prepare('SELECT state FROM entries WHERE id = ?').get(created.entryId) as { state: string }).state)
+      .toBe('submitted')
+
+    const maximum = '😀'.repeat(1000)
+    const accepted = await call(h.port, `/review/${created.bundleId}/decide`, {
+      method: 'POST', token: TOKEN_ADMIN,
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ decision: 'approve', comment: maximum })
+    })
+    expect(accepted.status).toBe(200)
+    expect((h.db.prepare('SELECT decisionComment FROM entries WHERE id = ?').get(created.entryId) as { decisionComment: string }).decisionComment)
+      .toBe(maximum)
+  })
+
   it('does not approve when introspect returns OUTBOX for an ADMIN route', async () => {
     const permissive: Introspect = async (token) => {
       const person = PEOPLE[token]
@@ -1332,28 +1457,32 @@ describe('POST /api/review', () => {
     expect(res.json).toEqual({
       ok: true,
       blocking: ['Forbidden claim: trustless'],
-      hints: [],
       charCount: [...BLOCKING].length,
       costHint: 'X pay-per-use: 0.015 USD per post, 0.200 USD if the post contains a URL.'
     })
     expect(entryCount(h.db)).toBe(0)
   })
 
-  it('returns the empty draft counters and no findings for the blank composer state', async () => {
+  it('ignores emoji, long sentences, and text over 280 characters', async () => {
     const h = await start()
+    const longText = `😀 ${Array.from({ length: 40 }, (_, index) => `word${index}`).join(' ')} ${'long '.repeat(60)}`
     const res = await call(h.port, '/api/review', {
       method: 'POST', token: TOKEN_A,
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ text: '' })
+      body: JSON.stringify({ text: longText })
     })
     expect(res.status).toBe(200)
-    expect(res.json).toMatchObject({
-      ok: true,
-      blocking: [],
-      hints: [],
-      charCount: 0,
-      costHint: 'X pay-per-use: 0.015 USD per post, 0.200 USD if the post contains a URL.'
-    })
+    expect(res.json).toMatchObject({ ok: true, blocking: [], charCount: [...longText].length })
+    expect(res.json).not.toHaveProperty('hints')
+    expect(res.text).not.toContain('More than 0 emoji.')
+    expect(res.text).not.toContain('A sentence is longer than 35 words.')
+    expect(res.text).not.toContain(`Character count ${[...longText].length} exceeds 280.`)
+    const created = await submitJson(h.port, TOKEN_A, { text: longText, scheduledAt: FUTURE_LOCAL })
+    const bundleId = (created.json as { bundleId: string }).bundleId
+    const page = await call(h.port, `/review/${bundleId}`, { token: TOKEN_A })
+    expect(page.text).not.toContain('More than 0 emoji.')
+    expect(page.text).not.toContain('A sentence is longer than 35 words.')
+    expect(page.text).not.toContain('Character count')
   })
 })
 

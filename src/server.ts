@@ -69,6 +69,7 @@ type EntryView = {
   text: string
   scheduledAt: number
   checks: string | null
+  decisionComment: string | null
   authoredByUser: string
   authoredByAccount: string
   postId: string | null
@@ -78,7 +79,7 @@ type EntryView = {
   imageSha256: string | null
 }
 
-const ENTRY_VIEW_SQL = `SELECT e.id, e.bundleId, e.state, e.text, e.scheduledAt, e.checks, e.imageSha256,
+const ENTRY_VIEW_SQL = `SELECT e.id, e.bundleId, e.state, e.text, e.scheduledAt, e.checks, e.decisionComment, e.imageSha256,
        b.authoredByUser, b.authoredByAccount, p.id AS postId, p.channel,
        p.status AS channelStatus, p.url AS postUrl
 FROM entries e
@@ -453,6 +454,7 @@ export function createOutboxServer(deps: OutboxServerDeps): Server {
           scheduledLabel: formatZurich(row.scheduledAt),
           channel: row.postId === null ? null : { postId: row.postId, status: row.channelStatus!, url: row.postUrl },
           imageSha256: row.imageSha256,
+          decisionComment: row.decisionComment,
           authorMessage: authorStatusMessage(row.state, row.channelStatus)
         }))
       }))
@@ -517,6 +519,7 @@ export function createOutboxServer(deps: OutboxServerDeps): Server {
           state: row.state,
           text: row.text,
           scheduledAt: row.scheduledAt,
+          decisionComment: row.decisionComment,
           authoredByAccount: row.authoredByAccount,
           channel
         }
@@ -570,6 +573,7 @@ export function createOutboxServer(deps: OutboxServerDeps): Server {
                 url: row.postUrl
               },
           imageSha256: row.imageSha256,
+          decisionComment: row.decisionComment,
           authorMessage: authorStatusMessage(row.state, row.channelStatus)
         })
       )
@@ -630,7 +634,6 @@ export function createOutboxServer(deps: OutboxServerDeps): Server {
       sendJson(res, 200, {
         ok: true,
         blocking: reviewed.checks.blocking,
-        hints: reviewed.checks.hints ?? [],
         charCount: characterCount(text),
         costHint: costHint(text)
       })
@@ -722,8 +725,7 @@ export function createOutboxServer(deps: OutboxServerDeps): Server {
           sendJson(res, 409, {
             ok: false,
             reason: 'blocking-review',
-            blocking: reviewed.checks.blocking,
-            hints: reviewed.checks.hints ?? []
+            blocking: reviewed.checks.blocking
           })
           return
         }
@@ -826,6 +828,12 @@ export function createOutboxServer(deps: OutboxServerDeps): Server {
         fail(res, req, pathname, 400, 'invalid-request', 'decision must be approve or reject.')
         return
       }
+      const rawComment = parsed.fields.comment
+      const comment = rawComment?.trim() || null
+      if (comment !== null && [...comment].length > 1000) {
+        fail(res, req, pathname, 400, 'invalid-request', 'Comment must be at most 1000 characters.')
+        return
+      }
       const rows = deps.db
         .prepare(`${ENTRY_VIEW_SQL} WHERE e.bundleId = ?`)
         .all(bundleId) as EntryView[]
@@ -841,6 +849,7 @@ export function createOutboxServer(deps: OutboxServerDeps): Server {
       const result = decideEntry(deps.db, {
         entryId: row.id,
         decision,
+        comment,
         actor: { user: auth.identity.user, account: auth.identity.account },
         now: now()
       })

@@ -42,6 +42,7 @@ function approve(text: string, scheduledAt: number) {
   const decided = decideEntry(db, {
     entryId: created.entryId,
     decision: 'approve',
+    comment: null,
     actor: ADMIN,
     now: SETUP_NOW
   })
@@ -202,6 +203,7 @@ describe('serial publisher', () => {
     const decided = decideEntry(db, {
       entryId: created.entryId,
       decision: 'approve',
+      comment: null,
       actor: ADMIN,
       now: SETUP_NOW
     })
@@ -251,6 +253,7 @@ describe('serial publisher', () => {
     const decided = decideEntry(db, {
       entryId: created.entryId,
       decision: 'approve',
+      comment: null,
       actor: ADMIN,
       now: SETUP_NOW
     })
@@ -362,6 +365,7 @@ describe('serial publisher', () => {
     const decided = decideEntry(db, {
       entryId: created.entryId,
       decision: 'approve',
+      comment: null,
       actor: ADMIN,
       now: SETUP_NOW
     })
@@ -388,7 +392,7 @@ describe('serial publisher', () => {
     const image = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, 1])
     const created = submitSubmission(db, { text: 'image copy', scheduledAt: NOW, imageBytes: image, checks: { blocking: [] }, actor: ACTOR, now: SETUP_NOW })
     if (!created.ok) throw new Error('submission failed')
-    const approved = decideEntry(db, { entryId: created.entryId, decision: 'approve', actor: ADMIN, now: SETUP_NOW })
+    const approved = decideEntry(db, { entryId: created.entryId, decision: 'approve', comment: null, actor: ADMIN, now: SETUP_NOW })
     if (!approved.ok) throw new Error('approval failed')
     const row = db.prepare('SELECT p.id, e.imageSha256 FROM scheduled_posts p JOIN entries e ON e.id = p.entryId WHERE p.entryId = ?').get(created.entryId) as { id: string; imageSha256: string }
     db.prepare('DELETE FROM media WHERE sha256 = ?').run(row.imageSha256)
@@ -408,7 +412,7 @@ describe('serial publisher', () => {
     const image = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, 1])
     const created = submitSubmission(db, { text: 'image lookup error', scheduledAt: NOW, imageBytes: image, checks: { blocking: [] }, actor: ACTOR, now: SETUP_NOW })
     if (!created.ok) throw new Error('submission failed')
-    const approved = decideEntry(db, { entryId: created.entryId, decision: 'approve', actor: ADMIN, now: SETUP_NOW })
+    const approved = decideEntry(db, { entryId: created.entryId, decision: 'approve', comment: null, actor: ADMIN, now: SETUP_NOW })
     if (!approved.ok) throw new Error('approval failed')
     const row = db.prepare('SELECT id FROM scheduled_posts WHERE entryId = ?').get(created.entryId) as { id: string }
     db.prepare('ALTER TABLE media RENAME TO unavailable_media').run()

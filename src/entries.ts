@@ -18,8 +18,7 @@ export type Actor = {
  * value without `blocking` is not a pass — `canDecide` rejects those.
  */
 export const EntryChecksSchema = z.object({
-  blocking: z.array(z.string()),
-  hints: z.array(z.string()).optional()
+  blocking: z.array(z.string())
 })
 export type EntryChecks = z.infer<typeof EntryChecksSchema>
 
@@ -47,6 +46,7 @@ export type RetractResult = { ok: true } | { ok: false; reason: 'conflict' }
 export type DecideInput = {
   entryId: string
   decision: 'approve' | 'reject'
+  comment: string | null
   actor: Actor
   now?: number
 }
@@ -340,10 +340,10 @@ export function decideEntry(db: SqliteDatabase, input: DecideInput): DecideResul
       const updated = db
         .prepare(
           `UPDATE entries
-           SET state = ?, decidedByUser = ?, decidedByAccount = ?, decidedAt = ?
+           SET state = ?, decidedByUser = ?, decidedByAccount = ?, decidedAt = ?, decisionComment = ?
            WHERE id = ? AND state = ?`
         )
-        .run(nextState, actor.user, actor.account, now, input.entryId, 'submitted' satisfies EntryState)
+        .run(nextState, actor.user, actor.account, now, input.comment, input.entryId, 'submitted' satisfies EntryState)
 
       if (updated.changes !== 1) return refuseConflict()
 

@@ -191,7 +191,7 @@ const disabledSubmitStates = new Set(['01-composer/06-typing-blocked'])
 const stateButtonPolicy = {
   '02-review-approver/01-submitted-clear': ['Approve', 'Reject'],
   '02-review-approver/11-submitted-image': ['Approve', 'Reject'],
-  '02-review-approver/02-submitted-hints': ['Approve', 'Reject'],
+  '02-review-approver/02-comment-typed': ['Approve', 'Reject'],
   '02-review-approver/03-submitted-past': ['Reject'],
   '02-review-approver/07-failed': ['Retry'],
   '02-review-approver/08-uncertain': ['Mark as sent', 'Mark as failed'],
@@ -458,8 +458,8 @@ async function main() {
   const clearReview = composer.page.waitForResponse((response) => response.url().endsWith('/api/review') && response.request().method() === 'POST')
   await composer.page.locator('#text').fill(clearDraft)
   await clearReview
-  await composer.page.getByText('No blocking findings and no hints.', { exact: true }).waitFor()
-  await capture(composer.page, '01-composer', '05-typing-clear', ['No blocking findings and no hints.', clearDraft])
+  await composer.page.getByText('No blocking findings.', { exact: true }).waitFor()
+  await capture(composer.page, '01-composer', '05-typing-clear', ['No blocking findings.', clearDraft])
 
   const blockedDraft = 'Everyone who joins this week gets guaranteed returns.'
   const blockedReview = composer.page.waitForResponse((response) => response.url().endsWith('/api/review') && response.request().method() === 'POST')
@@ -472,7 +472,7 @@ async function main() {
   await composer.page.locator('#text').fill('A calm image accompanies this update.')
   const imageTextReview = composer.page.waitForResponse((response) => response.url().endsWith('/api/review') && response.request().method() === 'POST')
   await imageTextReview
-  await composer.page.getByText('No blocking findings and no hints.', { exact: true }).waitFor()
+  await composer.page.getByText('No blocking findings.', { exact: true }).waitFor()
   await composer.page.locator('#image').setInputFiles({ name: 'handbook-image.png', mimeType: 'image/png', buffer: testPng })
   await composer.page.locator('#image-preview:not([hidden])').waitFor()
   await capture(composer.page, '01-composer', '07-image-selected', ['Submit for approval'])
@@ -482,10 +482,10 @@ async function main() {
   const badImageNavigation = composer.page.waitForNavigation()
   await composer.page.locator('#submit-button').click()
   await badImageNavigation
-  await composer.page.getByText('No blocking findings and no hints.', { exact: true }).waitFor()
+  await composer.page.getByText('No blocking findings.', { exact: true }).waitFor()
   await capture(composer.page, '01-composer', '08-bad-image', [
     'Image must be a PNG or JPEG up to 5 MB.',
-    'No blocking findings and no hints.'
+    'No blocking findings.'
   ])
 
   const noScriptContext = await browser.newContext({ viewport, deviceScaleFactor, locale: 'en-GB', timezoneId: 'Europe/Zurich', javaScriptEnabled: false, extraHTTPHeaders: { authorization: `Bearer ${jwt('OUTBOX')}` } })
@@ -512,16 +512,16 @@ async function main() {
   await composer.page.locator('#text').fill('A neutral post with a future review time.')
   await setScheduledTime(composer.page, zonedDate(-10))
   await Promise.all([composer.page.waitForNavigation(), composer.page.locator('button[type=submit]').click()])
-  await composer.page.getByText('No blocking findings and no hints.', { exact: true }).waitFor()
+  await composer.page.getByText('No blocking findings.', { exact: true }).waitFor()
   await capture(composer.page, '01-composer', '03-past-time', [
     'The scheduled time is already in the past.',
-    'No blocking findings and no hints.'
+    'No blocking findings.'
   ])
 
   const clear = await submit(composer, 'A short update is scheduled after tomorrow’s review.')
   const clearApprover = await reviewPage(approver.context, clear.bundleId)
-  await capture(clearApprover, '02-review-approver', '01-submitted-clear', ['submitted', 'Approve', 'Reject', 'No blocking findings and no hints.'])
-  await capture(await reviewPage(composer.context, clear.bundleId), '03-review-author', '01-submitted-clear', ['submitted', 'No blocking findings and no hints.'])
+  await capture(clearApprover, '02-review-approver', '01-submitted-clear', ['submitted', 'Approve', 'Reject', 'No blocking findings.', 'Comment for the author (optional)'])
+  await capture(await reviewPage(composer.context, clear.bundleId), '03-review-author', '01-submitted-clear', ['submitted', 'No blocking findings.'])
   const imageDraft = 'A reference image is attached to this submitted update.'
   await composer.page.goto(`http://127.0.0.1:${appPort}/`)
   await composer.page.locator('#text').fill(imageDraft)
@@ -540,14 +540,28 @@ async function main() {
   const approvedReview = await reviewPage(approver.context, approvedBundle)
   await captureSharedState(await reviewPage(composer.context, approvedBundle), approvedReview, '04-pending', ['approved', 'pending'])
 
-  const hintText = 'Our team will review the updated schedule, confirm the revised delivery window, check that every location has the correct contact details, and share the final notice with staff once the maintenance work is complete before offices reopen.'
-  const hinted = await submit(composer, hintText)
-  const hintedAdmin = await reviewPage(approver.context, hinted.bundleId)
-  await capture(hintedAdmin, '02-review-approver', '02-submitted-hints', ['A sentence is longer than 35 words.', 'Approve', 'Reject'])
-  await capture(await reviewPage(composer.context, hinted.bundleId), '03-review-author', '02-submitted-hints', ['A sentence is longer than 35 words.'])
-  await clickDecision(hintedAdmin, 'reject')
-  await capture(hintedAdmin, '04-results-and-errors', '02-rejected-result', ['Decided', 'Rejected.'])
-  await captureSharedState(await reviewPage(composer.context, hinted.bundleId), await reviewPage(approver.context, hinted.bundleId), '09-rejected', ['rejected'])
+  const commentText = 'A revised event announcement is ready for approval.'
+  const commented = await submit(composer, commentText)
+  const commentAdmin = await reviewPage(approver.context, commented.bundleId)
+  const approverComment = 'Please name the date of the event.'
+  await commentAdmin.locator('#decision-comment').fill(approverComment)
+  if (await commentAdmin.locator('#decision-comment').inputValue() !== approverComment) fail('Approver comment was not present before the comment capture')
+  await capture(commentAdmin, '02-review-approver', '02-comment-typed', ['submitted', commentText, 'Comment for the author (optional)', 'Approve', 'Reject'])
+
+  const longCommentEntry = await submit(composer, 'A separate event update is ready for review.')
+  const longCommentAdmin = await reviewPage(approver.context, longCommentEntry.bundleId)
+  await longCommentAdmin.locator('#decision-comment').evaluate((field) => field.removeAttribute('maxlength'))
+  await longCommentAdmin.locator('#decision-comment').fill('x'.repeat(1001))
+  await Promise.all([longCommentAdmin.waitForNavigation(), longCommentAdmin.locator('button[name=decision][value=reject]').click()])
+  await capture(longCommentAdmin, '04-results-and-errors', '13-comment-too-long', ['Request failed', 'Comment must be at most 1000 characters.'])
+
+  await clickDecision(commentAdmin, 'reject')
+  await capture(commentAdmin, '04-results-and-errors', '02-rejected-result', ['Decided', 'Rejected.'])
+  await captureSharedState(await reviewPage(composer.context, commented.bundleId), await reviewPage(approver.context, commented.bundleId), '09-rejected', ['rejected'])
+  await capture(await reviewPage(composer.context, commented.bundleId), '03-review-author', '02-rejected-comment', ['Rejected by an approver.', 'Comment from the approver', approverComment])
+  const commentedPosts = await composer.context.newPage()
+  await commentedPosts.goto(`http://127.0.0.1:${appPort}/posts`)
+  await capture(commentedPosts, '05-posts', '05-author-comment', ['Rejected by an approver.', `Comment: ${approverComment}`])
 
   const pastLock = await submit(composer, 'A post that will be reviewed after its time.', zonedDate(1))
   await new Promise((resolvePromise) => setTimeout(resolvePromise, 6 * 60_000 + 5_000))

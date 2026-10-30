@@ -34,11 +34,11 @@
     "src/time.ts",
     "src/x-client.ts"
   ],
-  "inputsSha256": "295070fbc85bcd32be82b43304e62d7ec9291b9882acaedf7790b85635ee21db",
+  "inputsSha256": "f52799b16c263c84223bd23659783bead0bb1ef3576dcae24a7ee07ba65ab741",
   "viewport": {
     "width": 760,
     "height": "visible body content + 24px"
   },
   "deviceScaleFactor": 2,
-  "count": 41
+  "count": 43
 }

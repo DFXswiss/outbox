@@ -12,7 +12,7 @@ const review = (overrides: Partial<Parameters<typeof renderReviewPage>[0]> = {})
   text: 'A reviewed post.',
   scheduledLabel: '15 Jul 2024, 12:00',
   state: 'submitted',
-  recorded: { blocking: [], hints: [] },
+  recorded: { blocking: [] },
   lockReason: null,
   approver: true,
   channel: null,
@@ -29,7 +29,7 @@ describe('composer markup', () => {
       error: value,
       charCount: 1,
       costHint: value,
-      recorded: { blocking: [value], hints: [value] }
+      recorded: { blocking: [value] }
     })
     expect(html).not.toContain(value)
     expect(html).toContain(`<textarea id="text" name="text" required>${escaped}</textarea>`)
@@ -37,8 +37,8 @@ describe('composer markup', () => {
     expect(html).toContain(`<div class="callout error"><svg`)
     expect(html).toContain(`<p>${escaped}</p>`)
     expect(html).toContain(`<div class="finding blocked"><svg`)
-    expect(html).toContain(`<div class="finding hint"><svg`)
-    expect([...html.matchAll(new RegExp(`<span>${escaped}</span>`, 'g'))]).toHaveLength(2)
+    expect(html).not.toContain('icon-hint')
+    expect([...html.matchAll(new RegExp(`<span>${escaped}</span>`, 'g'))]).toHaveLength(1)
   })
 
   it('renders the accessible 5-minute schedule, image field, preview and escaped content', () => {
@@ -72,11 +72,11 @@ describe('composer markup', () => {
       scheduledAt: '',
       charCount: 0,
       costHint: 'No cost estimate.',
-      recorded: { blocking: [], hints: [] }
+      recorded: { blocking: [] }
     })
 
     expect(html).toContain('<em>Preview</em>')
-    expect(html).toContain('No blocking findings and no hints.')
+    expect(html).toContain('No blocking findings.')
     expect(html).toContain('Review checks')
     expect(html).toContain('aria-hidden="true"')
   })
@@ -87,7 +87,7 @@ describe('composer markup', () => {
       scheduledAt: '',
       charCount: 18,
       costHint: 'No cost estimate.',
-      recorded: { blocking: ['x'], hints: [] }
+      recorded: { blocking: ['x'] }
     })
     const submitButton = html.match(/<button id="submit-button"[^>]*>/)?.[0]
 
@@ -107,7 +107,7 @@ describe('composer markup', () => {
       scheduledAt: '',
       charCount: 0,
       costHint: 'No cost estimate.',
-      recorded: { blocking: ['A blocking finding.'], hints: [] }
+      recorded: { blocking: ['A blocking finding.'] }
     })
 
     expect(blank).toContain('Checks appear here as you type.')
@@ -128,7 +128,7 @@ describe('composer markup', () => {
     expect(html).toContain('[hidden]{display:none!important}')
     expect(html).toContain('button:disabled,button:disabled:hover{background:var(--neutral-soft)')
     expect(html).toContain('<template id="icon-blocked"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></template>')
-    expect(html).toContain('<template id="icon-hint"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3 2.8 19h18.4L12 3Z"/><path d="M12 9v4m0 3h.01"/></svg></template>')
+    expect(html).not.toContain('icon-hint')
     expect(html).toContain('<template id="icon-clear"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12 4 4L19 6"/></svg></template>')
   })
 })
@@ -143,6 +143,7 @@ describe('post excerpts', () => {
       text,
       authorMessage: 'Waiting for approval.',
       imageSha256: null,
+      decisionComment: null,
       channel: null
     }]
   })
@@ -175,8 +176,8 @@ describe('post excerpts', () => {
 
 describe('review markup', () => {
   it('omits the Checked scope line from review findings too', () => {
-    const html = review({ recorded: { blocking: [], hints: [] } })
-    expect(html).toContain('No blocking findings and no hints.')
+    const html = review({ recorded: { blocking: [] } })
+    expect(html).toContain('No blocking findings.')
     expect(html).not.toContain('Checked:')
   })
 
@@ -188,7 +189,7 @@ describe('review markup', () => {
       text: value,
       scheduledLabel: value,
       state: value,
-      recorded: { blocking: [value], hints: [value] },
+      recorded: { blocking: [value] },
       lockReason: value,
       channel: { postId: 'a/b?c#d', channel: value, status: value, url: `https://example.test/post?q=${value}` }
     })
@@ -201,10 +202,14 @@ describe('review markup', () => {
     expect(html).toContain(`Channel: ${escaped}</span>`)
     expect(html).toContain(`class="status status-unknown">${escaped}</span>`)
     expect(html).toContain(`<div class="finding blocked"><svg`)
-    expect(html).toContain(`<div class="finding hint"><svg`)
+    expect(html).not.toContain('finding hint')
 
     const decideHtml = review({ bundleId: 'a/b?c#d', state: 'submitted', approver: true, lockReason: null })
     expect(decideHtml).toContain('/review/a%2Fb%3Fc%23d/decide')
+    expect(decideHtml).toContain('<label for="decision-comment">Comment for the author (optional)</label>')
+    expect(decideHtml).toContain('name="comment" maxlength="1000" rows="3"')
+    expect(review({ approver: false })).not.toContain('decision-comment')
+    expect(review({ state: 'approved' })).not.toContain('decision-comment')
 
     const uncertainHtml = review({
       state: 'approved',
@@ -224,6 +229,25 @@ describe('review markup', () => {
     })
     expect(urlHtml).not.toContain(value)
     expect(urlHtml).toContain(`href="https://example.test/post?q=${escaped}"`)
+  })
+
+  it('shows an escaped approver comment to reviewers and trims it in the posts list', () => {
+    const value = '<script>keep safe</script>'
+    const escaped = '&lt;script&gt;keep safe&lt;/script&gt;'
+    const reviewHtml = review({ state: 'rejected', approver: false, decisionComment: value })
+    expect(reviewHtml).toContain('<section class="card comment" aria-label="Approver comment">')
+    expect(reviewHtml).toContain(`<p class="comment-text">${escaped}</p>`)
+    expect(reviewHtml).not.toContain(value)
+
+    const postsHtml = renderPostsPage({
+      author: true,
+      posts: [{
+        bundleId: 'bundle-1', state: 'rejected', text: 'Post', scheduledLabel: '15 Jul 2024, 12:00',
+        channel: null, imageSha256: null, authorMessage: 'Rejected by an approver.', decisionComment: value
+      }]
+    })
+    expect(postsHtml).toContain(`Comment: ${escaped}`)
+    expect(postsHtml).not.toContain(value)
   })
 
   it.each([

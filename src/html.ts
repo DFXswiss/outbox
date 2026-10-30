@@ -37,6 +37,7 @@ const STYLE = [
   'textarea:focus-visible,input:focus-visible{outline:2px solid var(--primary);outline-offset:2px;border-color:var(--primary)}',
   '.field{margin:0 0 var(--space-4)}',
   '.actions{display:flex;flex-wrap:wrap;align-items:center;gap:var(--space-3);margin-top:var(--space-4)}',
+  '.actions .field{flex-basis:100%;margin:0}.actions textarea{min-height:96px}',
   'button{display:inline-flex;align-items:center;justify-content:center;min-height:48px;padding:0 var(--space-5);border:1px solid var(--transparent);border-radius:var(--radius-button);background:var(--primary);box-shadow:var(--shadow-button);color:var(--primary-text);font:600 16px/1.2 Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;cursor:pointer;transition:background-color .15s ease,box-shadow .15s ease,transform .15s ease}',
   'button:hover{background:var(--primary-hover);box-shadow:var(--shadow-button-hover)}',
   'button:active{transform:translateY(1px)}',
@@ -64,8 +65,8 @@ const STYLE = [
   '.finding{display:flex;align-items:flex-start;gap:var(--space-3);font-weight:600}',
   '.finding svg,.result-icon svg,.callout svg{width:20px;height:20px;flex:none}',
   '.finding.blocked{color:var(--error)}',
-  '.finding.hint{color:var(--warning)}',
   '.finding.clear{color:var(--success-ink);font-weight:500}',
+  '.comment-text{white-space:pre-wrap;overflow-wrap:anywhere}',
   '.scope{margin:0;padding-top:var(--space-3)}',
   '.callout{display:flex;align-items:flex-start;gap:var(--space-3);margin:var(--space-4) 0;padding:var(--space-3) var(--space-4);border:1px solid var(--border);border-radius:var(--radius-md);font-size:14px}',
   '.callout p{margin:0}',
@@ -146,11 +147,10 @@ function renderChecks(recorded: EntryChecks | null | undefined): string {
     )
   }
   const lines = [
-    ...recorded.blocking.map((line) => `<div class="finding blocked">${ICONS.cross}<span>${escapeHtml(line)}</span></div>`),
-    ...(recorded.hints ?? []).map((line) => `<div class="finding hint">${ICONS.warning}<span>${escapeHtml(line)}</span></div>`)
+    ...recorded.blocking.map((line) => `<div class="finding blocked">${ICONS.cross}<span>${escapeHtml(line)}</span></div>`)
   ]
   if (lines.length === 0) {
-    lines.push(`<div class="finding clear">${ICONS.check}<span>No blocking findings and no hints.</span></div>`)
+    lines.push(`<div class="finding clear">${ICONS.check}<span>No blocking findings.</span></div>`)
   }
   return `<section class="card checks" id="review-checks" aria-label="Review checks" aria-live="polite">${lines.join('')}</section>`
 }
@@ -213,7 +213,6 @@ ${error}
 </section>
 ${findings}
 <template id="icon-blocked">${ICONS.cross}</template>
-<template id="icon-hint">${ICONS.warning}</template>
 <template id="icon-clear">${ICONS.check}</template>
 <p class="meta" id="check-unavailable" hidden>Check unavailable — it runs again on submit.</p>
 <script src="/assets/composer.js" defer></script>
@@ -233,6 +232,7 @@ export type ReviewPageInput = {
   channel: { postId: string; channel: string; status: string; url: string | null } | null
   imageSha256?: string | null
   authorMessage?: string | null
+  decisionComment?: string | null
 }
 
 export function renderReviewPage(input: ReviewPageInput): string {
@@ -247,7 +247,7 @@ export function renderReviewPage(input: ReviewPageInput): string {
     const approve = showApprove
       ? '<button type="submit" name="decision" value="approve">Approve</button>'
       : ''
-    actions = `<form class="actions" method="post" action="/review/${encodeURIComponent(input.bundleId)}/decide">${approve}<button class="destructive" type="submit" name="decision" value="reject">Reject</button></form>`
+    actions = `<form class="actions" method="post" action="/review/${encodeURIComponent(input.bundleId)}/decide"><div class="field"><label for="decision-comment">Comment for the author (optional)</label><textarea id="decision-comment" name="comment" maxlength="1000" rows="3"></textarea></div>${approve}<button class="destructive" type="submit" name="decision" value="reject">Reject</button></form>`
   }
   const publishedLink = input.channel?.status === 'sent' && input.channel.url
     ? `<a class="published-link" href="${escapeHtml(input.channel.url)}">View published post</a>`
@@ -280,6 +280,7 @@ ${navigation('posts')}
 <h1>Review</h1>
 <div class="meta-row">${statusChip(input.state)}<span aria-hidden="true">·</span><span class="meta tabular">${escapeHtml(input.scheduledLabel)}</span></div>
 ${input.authorMessage ? `<p class="meta">${escapeHtml(input.authorMessage)}</p>` : ''}
+${input.decisionComment ? `<section class="card comment" aria-label="Approver comment"><p class="meta">Comment from the approver</p><p class="comment-text">${escapeHtml(input.decisionComment)}</p></section>` : ''}
 ${lock}
 <section class="card preview"><div class="text">${escapeHtml(input.text)}</div>${input.imageSha256 ? `<img src="/media/${escapeHtml(input.imageSha256)}" alt="Attached image">` : ''}</section>
 ${renderChecks(input.recorded)}
@@ -297,6 +298,7 @@ export type PostListItem = {
   channel: { postId: string; status: string; url: string | null } | null
   imageSha256: string | null
   authorMessage: string
+  decisionComment: string | null
 }
 
 export function authorStatusMessage(state: string, channelStatus: string | null): string {
@@ -335,6 +337,6 @@ export function truncatePostText(text: string): string {
 export function renderPostsPage(input: { posts: PostListItem[]; author: boolean }): string {
   const content = input.posts.length === 0
     ? `<section class="card"><p>No posts yet.</p>${input.author ? '<a href="/">Write a post</a>' : ''}</section>`
-    : `<div class="posts">${input.posts.map((post) => `<article class="card post-card"><div class="meta-row">${statusChip(post.state)}${post.channel ? statusChip(post.channel.status) : ''}<span class="meta tabular">${escapeHtml(post.scheduledLabel)}</span></div><p>${escapeHtml(truncatePostText(post.text))}</p>${post.imageSha256 ? '<p class="meta">Image attached</p>' : ''}<p>${escapeHtml(post.authorMessage)}</p>${post.channel?.status === 'sent' && post.channel.url ? `<a href="${escapeHtml(post.channel.url)}">View on X</a> · ` : ''}<a href="/review/${encodeURIComponent(post.bundleId)}">Open</a></article>`).join('')}</div>`
+    : `<div class="posts">${input.posts.map((post) => `<article class="card post-card"><div class="meta-row">${statusChip(post.state)}${post.channel ? statusChip(post.channel.status) : ''}<span class="meta tabular">${escapeHtml(post.scheduledLabel)}</span></div><p>${escapeHtml(truncatePostText(post.text))}</p>${post.imageSha256 ? '<p class="meta">Image attached</p>' : ''}<p>${escapeHtml(post.authorMessage)}</p>${post.decisionComment ? `<p class="comment-text">Comment: ${escapeHtml(truncatePostText(post.decisionComment))}</p>` : ''}${post.channel?.status === 'sent' && post.channel.url ? `<a href="${escapeHtml(post.channel.url)}">View on X</a> · ` : ''}<a href="/review/${encodeURIComponent(post.bundleId)}">Open</a></article>`).join('')}</div>`
   return page('Posts', `<main>${brandHeader()}${navigation('posts')}<h1>Posts</h1>${content}</main>`)
 }

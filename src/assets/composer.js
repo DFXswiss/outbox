@@ -10,7 +10,6 @@ const imagePreview = document.querySelector('#image-preview')
 const imageMessage = document.querySelector('#image-message')
 const findingIcons = {
   blocked: document.querySelector('#icon-blocked'),
-  hint: document.querySelector('#icon-hint'),
   clear: document.querySelector('#icon-clear')
 }
 
@@ -30,7 +29,7 @@ function addLine(className, message) {
   checks.append(line)
 }
 
-function renderFindings(blocking, hints) {
+function renderFindings(blocking) {
   checks.replaceChildren()
   if (textField.value.trim() === '') {
     const empty = document.createElement('p')
@@ -42,8 +41,7 @@ function renderFindings(blocking, hints) {
     return
   }
   blocking.forEach((line) => addLine('blocked', line))
-  hints.forEach((line) => addLine('hint', line))
-  if (blocking.length === 0 && hints.length === 0) addLine('clear', 'No blocking findings and no hints.')
+  if (blocking.length === 0) addLine('clear', 'No blocking findings.')
   submit.disabled = blocking.length > 0
   if (blocking.length > 0) submit.setAttribute('aria-describedby', 'review-checks')
   else submit.removeAttribute('aria-describedby')
@@ -67,7 +65,7 @@ async function checkText(sequence) {
     if (!response.ok || result.ok !== true) throw new Error('Review failed')
     charCount.textContent = String(result.charCount)
     cost.textContent = result.costHint
-    renderFindings(result.blocking, result.hints)
+    renderFindings(result.blocking)
     unavailable.hidden = true
   } catch (error) {
     if (sequence !== requestNumber) return

@@ -22,7 +22,8 @@ CREATE TABLE IF NOT EXISTS entries (
   checks TEXT,
   decidedByUser TEXT,
   decidedByAccount TEXT,
-  decidedAt INTEGER
+  decidedAt INTEGER,
+  decisionComment TEXT
 );
 
 CREATE TABLE IF NOT EXISTS scheduled_posts (
@@ -87,6 +88,10 @@ export function openDatabase(filePath: string) {
   db.pragma('foreign_keys = ON')
   db.pragma(`busy_timeout = ${BUSY_TIMEOUT_MS}`)
   db.exec(SCHEMA)
+  const entryColumns = db.pragma('table_info(entries)') as Array<{ name: string }>
+  if (!entryColumns.some((column) => column.name === 'decisionComment')) {
+    db.exec('ALTER TABLE entries ADD COLUMN decisionComment TEXT')
+  }
   return db
 }
 

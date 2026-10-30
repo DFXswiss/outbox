@@ -123,7 +123,7 @@ sequenceDiagram
   P->>B: POST /api/submit Cookie
   B->>API: GET /v1/auth/introspect/outbox Bearer
   B->>B: review rules.json; create bundle
-  Q->>B: POST /review/:id/decide {decision: approve or reject} Bearer
+  Q->>B: POST /review/:id/decide {decision: approve or reject, comment?} Bearer
   B->>API: GET /v1/auth/introspect/admin Bearer
   alt approve
     B->>B: CAS submitted to approved; queue in same tx
@@ -174,7 +174,7 @@ Channel status: `pending | in-flight | sent | failed | uncertain`. `PublishResul
 
 Phase 1: **one** brand, X only: **21 gifts**. The brand slug is configuration (`BRAND`), the pack lives at `content/<brand>/` **in the image**. `rules.json` is not part of this repository; the build adds it from a private source. Missing `rules.json` → submit 409 and health `ok: false`.
 
-Blocking: forbidden claims, MiCAR-unsafe, provisional without qualifier. Hints: emoji, sentence length, X character count. No LLM. Pack updates = new image.
+Blocking: forbidden claims, MiCAR-unsafe wording, and provisional parameters without a qualifier. No LLM. Pack updates = new image.
 
 ---
 
@@ -198,7 +198,7 @@ Blocking: forbidden claims, MiCAR-unsafe, provisional without qualifier. Hints: 
 | `GET /review/:id` | same visibility as `GET /api/posts` | `:id` is the **bundle** id. GET, no side effect; no token in the query |
 | `GET /posts` | OUTBOX or ADMIN | HTML status overview; authors see their own, approvers see all |
 | `GET /media/:sha256` | OUTBOX or ADMIN | Image bytes only when a visible entry references the image |
-| `POST /review/:id/decide` | ADMIN | `:id` is the bundle id. Body `{ decision: "approve"\|"reject" }` for that bundle's single entry (phase 1). CAS `submitted → approved\|rejected`. Queue insert **only** on `approve`, same transaction. Retract vs decide: one winner. Repeat 409. |
+| `POST /review/:id/decide` | ADMIN | `:id` is the bundle id. Body `{ decision: "approve"\|"reject", comment?: string }` for that bundle's single entry (phase 1). The optional comment is trimmed, limited to 1000 characters, stored as `decisionComment`, and shown to the author on Review and Posts. CAS `submitted → approved\|rejected`. Queue insert **only** on `approve`, same transaction. Retract vs decide: one winner. Repeat 409. |
 | `POST /api/posts/:id/retry` | ADMIN | CAS `WHERE id=? AND status='failed'` → `pending`; unknown id 404, else 409 |
 | `POST /api/posts/:id/resolve-uncertain` | ADMIN | `{ resolution: "sent"\|"failed", url? }`. CAS `WHERE id=? AND status='uncertain'`; unknown id 404, else 409 |
 
@@ -240,7 +240,7 @@ SQLite WAL. Tables: bundles, entries, scheduled_posts, publish_results, audit, m
 
 Phase 1: **one entry per bundle**. `GET`/`POST /review/:id` uses the bundle id. `media` stores deduplicated PNG/JPEG bytes by SHA-256.
 
-Bundles and scheduled_posts store `authoredByUser` + `authoredByAccount` (JWT `user` / `account` at submit). Entry state: `submitted | retracted | approved | rejected`. Submit creates `submitted`. Retract/decide are compare-and-set `WHERE state='submitted'` in `BEGIN IMMEDIATE`. Retract 409 unless every entry on the bundle is still `submitted`. `approved` writes `scheduled_posts` with `status='pending'` and `channel='x'` in the same transaction. `decidedByUser` / `decidedByAccount` only on approve/reject.
+Bundles and scheduled_posts store `authoredByUser` + `authoredByAccount` (JWT `user` / `account` at submit). Entry state: `submitted | retracted | approved | rejected`. Submit creates `submitted`. Retract/decide are compare-and-set `WHERE state='submitted'` in `BEGIN IMMEDIATE`. Retract 409 unless every entry on the bundle is still `submitted`. `approved` writes `scheduled_posts` with `status='pending'` and `channel='x'` in the same transaction. `decidedByUser` / `decidedByAccount` and optional `decisionComment` are stored on approve/reject.
 
 ---
 
