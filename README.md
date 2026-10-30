@@ -198,7 +198,7 @@ Blocking: forbidden claims, MiCAR-unsafe wording, and provisional parameters wit
 | `GET /review/:id` | same visibility as `GET /api/posts` | `:id` is the **bundle** id. GET, no side effect; no token in the query |
 | `GET /posts` | OUTBOX or ADMIN | HTML status overview; authors see their own, approvers see all |
 | `GET /media/:sha256` | OUTBOX or ADMIN | Image bytes only when a visible entry references the image |
-| `POST /review/:id/decide` | ADMIN | `:id` is the bundle id. Body `{ decision: "approve"\|"reject", comment?: string }` for that bundle's single entry (phase 1). The optional comment is trimmed, limited to 1000 characters, stored as `decisionComment`, and shown to the author on Review and Posts. CAS `submitted → approved\|rejected`. Queue insert **only** on `approve`, same transaction. Retract vs decide: one winner. Repeat 409. |
+| `POST /review/:id/decide` | ADMIN | `:id` is the bundle id. Body `{ decision: "approve"\|"reject", comment?: string }` for that bundle's single entry (phase 1). The optional comment is trimmed, limited to 1000 characters, stored as `decisionComment`, and shown to everyone who can see the entry on Review and Posts and in the JSON post views. CAS `submitted → approved\|rejected`. Queue insert **only** on `approve`, same transaction. Retract vs decide: one winner. Repeat 409. |
 | `POST /api/posts/:id/retry` | ADMIN | CAS `WHERE id=? AND status='failed'` → `pending`; unknown id 404, else 409 |
 | `POST /api/posts/:id/resolve-uncertain` | ADMIN | `{ resolution: "sent"\|"failed", url? }`. CAS `WHERE id=? AND status='uncertain'`; unknown id 404, else 409 |
 

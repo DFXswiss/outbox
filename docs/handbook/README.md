@@ -22,7 +22,7 @@ The content gate checks every built PNG for QR payloads and OCR text. QR payload
 
 ## Coverage
 
-Expected captured images by group: `01-composer`: 9; `02-review-approver`: 11; `03-review-author`: 5; `04-results-and-errors`: 12; `05-posts`: 4. Total: 41. The capture compares pending, in-flight, sent, rejected, and retracted Composer and Approver views byte-for-byte. Matching views share the Approver capture; a differing Composer image requires its own Markdown description and causes capture to stop until that description exists.
+Expected captured images by group: `01-composer`: 9; `02-review-approver`: 11; `03-review-author`: 5; `04-results-and-errors`: 13; `05-posts`: 5. Total: 43. The capture compares pending, in-flight, sent, rejected, and retracted Composer and Approver views byte-for-byte. Matching views share the Approver capture; a differing Composer image requires its own Markdown description and causes capture to stop until that description exists.
 
 Known gaps (3 variants in 3 causes):
 
