@@ -5,6 +5,7 @@ import {
   type ServerResponse
 } from 'node:http'
 import { readFileSync, readdirSync } from 'node:fs'
+import { randomBytes } from 'node:crypto'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { z } from 'zod'
@@ -21,11 +22,13 @@ import { characterCount, costHint, loadPackRules, reviewText } from './findings'
 import {
   authorStatusMessage,
   renderComposerPage,
+  renderLoginPage,
+  renderTfaPage,
   renderPlainPage,
   renderPostsPage,
   renderReviewPage
 } from './html'
-import { hasRoleAccess, type Identity, type Introspect, type Role } from './identity'
+import { decodeJwtHs256, validJwtClaims, hasRoleAccess, type Identity, type Introspect, type Role } from './identity'
 import { IMAGE_LIMIT, imageMime } from './image'
 import { createLog } from './log'
 import { resolveUncertain, retryPost } from './queue'
@@ -36,6 +39,10 @@ export type OutboxServerDeps = {
   packRoot: string
   brand: string
   introspect: Introspect
+  dfxApiBaseUrl?: string
+  outboxPublicUrl?: string
+  fetch?: typeof fetch
+  xMaxWeightedLength?: number
   now?: () => number
   jwtSecret?: string
   log?: (line: string) => void
@@ -56,7 +63,7 @@ const ResolveInputSchema = z.object({
 const SECURITY_HEADERS: Record<string, string> = {
   'content-security-policy':
     "default-src 'none'; script-src 'self'; connect-src 'self'; img-src 'self' blob:; style-src 'unsafe-inline'; font-src 'self'; form-action 'self'; base-uri 'none'",
-  'referrer-policy': 'no-referrer',
+  'referrer-policy': 'same-origin',
   'x-content-type-options': 'nosniff',
   'x-robots-tag': 'noindex, nofollow',
   'cache-control': 'private, no-store'
@@ -70,8 +77,8 @@ type EntryView = {
   scheduledAt: number
   checks: string | null
   decisionComment: string | null
-  authoredByUser: string
-  authoredByAccount: string
+  authoredByUser: number
+  authoredByAccount: number
   postId: string | null
   channel: string | null
   channelStatus: string | null
@@ -116,7 +123,7 @@ function send(
   res: ServerResponse,
   status: number,
   body: string | Buffer,
-  headers: Record<string, string>
+  headers: Record<string, string | string[]>
 ): void {
   res.writeHead(status, { ...SECURITY_HEADERS, ...headers })
   res.end(body)
@@ -169,7 +176,8 @@ function tokenFromRequest(
 
 function requestOriginHost(req: IncomingMessage): string | null {
   const origin = headerString(req.headers.origin)
-  if (origin && origin !== 'null') {
+  if (origin === 'null') return null
+  if (origin) {
     try {
       return new URL(origin).host.toLowerCase()
     } catch {
@@ -280,7 +288,7 @@ function loadEntryByBundle(db: SqliteDatabase, bundleId: string): EntryView | nu
   return rows[0] ?? null
 }
 
-function listEntries(db: SqliteDatabase, account: string | null): EntryView[] {
+function listEntries(db: SqliteDatabase, account: number | null): EntryView[] {
   if (account === null) {
     return db.prepare(`${ENTRY_VIEW_SQL} ORDER BY e.scheduledAt ASC`).all() as EntryView[]
   }
@@ -316,6 +324,9 @@ function validImage(bytes: Buffer | null): boolean {
 export function createOutboxServer(deps: OutboxServerDeps): Server {
   const now = deps.now ?? (() => Date.now())
   const brand = deps.brand
+  const upstream = (deps.dfxApiBaseUrl ?? '').replace(/\/$/, '')
+  const publicUrl = deps.outboxPublicUrl ?? ''
+  const backendFetch = deps.fetch ?? fetch
   const log = createLog(deps.log ?? ((line) => process.stdout.write(line + '\n')))
   const fontDirectory = join(dirname(fileURLToPath(import.meta.url)), 'assets', 'fonts')
   const fontNames = new Set(
@@ -368,6 +379,10 @@ export function createOutboxServer(deps: OutboxServerDeps): Server {
     detail: string,
     extra: Record<string, unknown> = {}
   ): void {
+    if (status === 401 && req.method === 'GET' && !wantsJson(req, pathname)) {
+      send(res, 302, '', { location: '/login' })
+      return
+    }
     if (wantsJson(req, pathname)) {
       sendJson(res, status, { ok: false, reason, detail, ...extra })
       return
@@ -380,12 +395,121 @@ export function createOutboxServer(deps: OutboxServerDeps): Server {
     const url = new URL(req.url ?? '/', `http://${host}`)
     const pathname = url.pathname
     const method = req.method ?? 'GET'
-    const authHeader = headerString(req.headers.authorization)
-    const cookieHeaderValue = headerString(req.headers.cookie)
-    const logParts = [`${method} ${pathname}`]
-    if (authHeader) logParts.push(`Authorization: ${authHeader}`)
-    if (cookieHeaderValue) logParts.push(`Cookie: ${cookieHeaderValue}`)
-    log(logParts.join(' '))
+    log(`${method} ${pathname}`)
+
+    const redirect = (path: string, cookie?: string) => send(res, 302, '', { location: path, ...(cookie ? { 'set-cookie': cookie } : {}) })
+    const pendingCookie = (id: string, maxAge = 600) => `outbox_pending=${encodeURIComponent(id)}; Path=/auth; Max-Age=${maxAge}; HttpOnly; SameSite=Lax${publicUrl.startsWith('https:') ? '; Secure' : ''}`
+    const pending = () => {
+      deps.db.prepare('DELETE FROM auth_pending WHERE createdAt <= ?').run(now() - 600_000)
+      const id = readCookie(req, 'outbox_pending')
+      if (!id) return null
+      return deps.db.prepare('SELECT id, token FROM auth_pending WHERE id = ?').get(id) as { id: string; token: string } | undefined ?? null
+    }
+    const upstreamRequest = (path: string, init: RequestInit = {}) => backendFetch(`${upstream}${path}`, { ...init, redirect: 'manual', signal: AbortSignal.timeout(5_000) })
+    const finishPending = async (item: { id: string; token: string }) => {
+      const result = await deps.introspect(item.token, 'OUTBOX')
+      if (!result.ok || !hasRoleAccess('OUTBOX', result.role)) {
+        const detail = !result.ok && result.reason === 'staff-kyc-required' ? 'This account has no verified name. Ask an admin to complete it.' : 'Access denied.'
+        deps.db.prepare('DELETE FROM auth_pending WHERE id = ?').run(item.id)
+        send(res, 403, renderPlainPage('Sign-in not possible', detail), { 'content-type': 'text/html; charset=utf-8', 'set-cookie': pendingCookie('', 0) })
+        return
+      }
+      const deleted = deps.db.prepare('DELETE FROM auth_pending WHERE id = ? AND createdAt > ?').run(item.id, now() - 600_000)
+      if (deleted.changes !== 1) { sendHtml(res, 401, renderPlainPage('Sign-in not possible', 'Please sign in again.')); return }
+      send(res, 302, '', { location: '/', 'set-cookie': [sessionCookie(item.token), pendingCookie('', 0)] })
+    }
+
+    if (method === 'GET' && pathname === '/assets/login.js') {
+      send(res, 200, readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'assets', 'login.js')), { 'content-type': 'text/javascript; charset=utf-8' })
+      return
+    }
+    if (method === 'GET' && pathname === '/login') { sendHtml(res, 200, renderLoginPage()); return }
+    if (method === 'POST' && pathname.startsWith('/auth/') &&
+      (pathname === '/auth/mail' || pathname === '/auth/tfa' || readCookie(req, COOKIE_NAME) !== null || readCookie(req, 'outbox_pending') !== null) && !originMatchesHost(req)) {
+      if (wantsJson(req, pathname)) sendJson(res, 403, { ok: false, reason: 'origin-mismatch' })
+      else sendHtml(res, 403, renderPlainPage('Forbidden', 'Origin does not match this host.'))
+      return
+    }
+    if (method === 'POST' && pathname === '/auth/mail') {
+      const parsed = await parseFields(req)
+      if (!parsed.ok || !parsed.fields.mail) { sendHtml(res, 400, renderPlainPage('Sign-in not possible', 'Enter an email address.')); return }
+      try {
+        const response = await upstreamRequest('/v1/auth/mail', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ mail: parsed.fields.mail, redirectUri: `${publicUrl}/auth/callback` }) })
+        if (response.status !== 201) throw new Error('mail failed')
+        sendHtml(res, 200, renderPlainPage('Email sent', 'Open the link in the email to continue.'))
+      } catch { sendHtml(res, 502, renderPlainPage('Sign-in not possible', 'Please try again later.')) }
+      return
+    }
+    if (method === 'GET' && pathname === '/auth/callback') {
+      const token = url.searchParams.get('session') ?? ''
+      if (!deps.jwtSecret) { sendHtml(res, 503, renderPlainPage('Sign-in not possible', 'Sign-in is not configured.')); return }
+      const claims = decodeJwtHs256(token, deps.jwtSecret)
+      if (!claims || claims.tfaRequired !== true || !validJwtClaims(claims, now())) { sendHtml(res, 401, renderPlainPage('Sign-in not possible', 'Please sign in again.')); return }
+      deps.db.prepare('DELETE FROM auth_pending WHERE createdAt <= ?').run(now() - 600_000)
+      const id = randomBytes(32).toString('hex')
+      deps.db.prepare('INSERT INTO auth_pending (id, token, createdAt) VALUES (?, ?, ?)').run(id, token, now())
+      redirect('/auth/tfa', pendingCookie(id))
+      return
+    }
+    if (pathname === '/auth/tfa' && (method === 'GET' || method === 'POST')) {
+      const item = pending()
+      if (!item) { redirect('/login', pendingCookie('', 0)); return }
+      try {
+        const headers = { authorization: `Bearer ${item.token}` }
+        if (method === 'POST') {
+          const parsed = await parseFields(req)
+          const code = parsed.ok ? parsed.fields.code ?? '' : ''
+          if (!/^[0-9]{6}$/.test(code)) { sendHtml(res, 400, renderTfaPage({ error: 'Enter a six-digit code.' })); return }
+          const verified = await upstreamRequest('/v1/auth/2fa/verify', { method: 'POST', headers: { ...headers, 'content-type': 'application/json' }, body: JSON.stringify({ token: code }) })
+          if (verified.status !== 201) { sendHtml(res, 400, renderTfaPage({ error: 'Invalid code. Please try again.' })); return }
+          await finishPending(item)
+          return
+        }
+        const check = await upstreamRequest('/v1/auth/2fa?level=Strict', { headers })
+        if (check.status === 200) { await finishPending(item); return }
+        const setup = await upstreamRequest('/v1/auth/2fa?level=Strict', { method: 'POST', headers })
+        if (setup.status === 409) { sendHtml(res, 200, renderTfaPage()); return }
+        if (setup.status === 201) {
+          const body = await setup.json() as { secret?: unknown; uri?: unknown }
+          if (typeof body.secret === 'string' && typeof body.uri === 'string') { sendHtml(res, 200, renderTfaPage({ secret: body.secret, uri: body.uri })); return }
+        }
+        sendHtml(res, 502, renderPlainPage('Sign-in not possible', 'Please try again later.'))
+      } catch { sendHtml(res, 502, renderPlainPage('Sign-in not possible', 'Please try again later.')) }
+      return
+    }
+    if (method === 'GET' && pathname === '/auth/wallet/message') {
+      const address = url.searchParams.get('address') ?? ''
+      if (!address) { sendJson(res, 400, { ok: false }); return }
+      try {
+        const response = await upstreamRequest(`/v1/auth/signMessage?address=${encodeURIComponent(address)}`)
+        const body = await response.json() as { message?: unknown }
+        if (response.status !== 200 || typeof body.message !== 'string') throw new Error('invalid message')
+        sendJson(res, 200, { message: body.message })
+      } catch { sendJson(res, 502, { ok: false }); }
+      return
+    }
+    if (method === 'POST' && (pathname === '/auth/wallet' || pathname === '/auth/callback')) {
+      const parsed = await parseFields(req)
+      if (!parsed.ok) { sendJson(res, 400, { ok: false }); return }
+      try {
+        let token = parsed.fields.accessToken ?? ''
+        if (pathname === '/auth/wallet') {
+          if (!parsed.fields.address || !parsed.fields.signature) { sendJson(res, 400, { ok: false }); return }
+          const response = await upstreamRequest('/v1/auth/signIn', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ address: parsed.fields.address, signature: parsed.fields.signature }) })
+          const body = await response.json() as { accessToken?: unknown }
+          if (response.status !== 201 || typeof body.accessToken !== 'string') throw new Error('sign in failed')
+          token = body.accessToken
+        }
+        if (!token) { sendJson(res, 400, { ok: false }); return }
+        let result = await deps.introspect(token, 'ADMIN')
+        if (result.ok && !hasRoleAccess('ADMIN', result.role)) result = { ok: false, status: 403 }
+        if (!result.ok && result.status === 403 && pathname === '/auth/callback') result = await deps.introspect(token, 'OUTBOX')
+        if (!result.ok || !hasRoleAccess('OUTBOX', result.role)) { sendJson(res, result.ok ? 403 : result.status, { ok: false }); return }
+        send(res, 200, JSON.stringify({ ok: true }), { 'content-type': 'application/json; charset=utf-8', 'set-cookie': sessionCookie(token) })
+      } catch { sendJson(res, 502, { ok: false }); }
+      return
+    }
+    if (method === 'POST' && pathname === '/auth/logout') { redirect('/login', `${COOKIE_NAME}=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Strict`); return }
 
     const fontRoute = /^\/assets\/fonts\/([^/]+)$/.exec(pathname)
     if (method === 'GET' && fontRoute && fontNames.has(fontRoute[1]!)) {
@@ -626,7 +750,7 @@ export function createOutboxServer(deps: OutboxServerDeps): Server {
         return
       }
       const text = parsed.fields.text ?? ''
-      const reviewed = reviewText(deps.packRoot, brand, text)
+      const reviewed = reviewText(deps.packRoot, brand, text, deps.xMaxWeightedLength)
       if (!reviewed.ok) {
         sendJson(res, 409, { ok: false, reason: 'missing-pack', detail: 'Review pack is missing.' })
         return
@@ -681,7 +805,7 @@ export function createOutboxServer(deps: OutboxServerDeps): Server {
         return
       }
 
-      const reviewed = reviewText(deps.packRoot, brand, text)
+      const reviewed = reviewText(deps.packRoot, brand, text, deps.xMaxWeightedLength)
       if (!reviewed.ok) {
         writeAudit(deps.db, {
           at: now(),

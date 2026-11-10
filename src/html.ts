@@ -112,6 +112,16 @@ function brandHeader(): string {
   return `<header class="brand">${LOGO}<span>Outbox</span></header>`
 }
 
+export function renderLoginPage(): string {
+  return page('Sign in', `<main>${brandHeader()}<h1>Sign in</h1><section class="card"><h2>Sign in with email</h2><form method="post" action="/auth/mail"><label for="mail">Email address</label><input id="mail" name="mail" type="email" required><div class="actions"><button type="submit">Send sign-in link</button></div></form></section><section class="card"><h2>Sign in with wallet</h2><p>For approvers.</p><button id="wallet-login" type="button">Connect wallet</button><p id="wallet-message" role="status"></p></section><script src="/assets/login.js" defer></script></main>`)
+}
+
+export function renderTfaPage(options: { secret?: string; uri?: string; error?: string } = {}): string {
+  const setup = options.secret && options.uri ? `<p>Set up your authenticator app with these details:</p><p>Secret: <code>${escapeHtml(options.secret)}</code></p><p>URI: <code>${escapeHtml(options.uri)}</code></p>` : ''
+  const error = options.error ? `<p class="callout error">${escapeHtml(options.error)}</p>` : ''
+  return page('Two-factor sign-in', `<main>${brandHeader()}<section class="card"><h1>Two-factor sign-in</h1>${setup}${error}<form method="post" action="/auth/tfa"><label for="code">Enter the six-digit code from your authenticator app.</label><input id="code" name="code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" required><div class="actions"><button type="submit">Sign in</button></div></form></section></main>`)
+}
+
 function navigation(active: 'new' | 'posts'): string {
   return `<nav class="nav" aria-label="Outbox"><a href="/"${active === 'new' ? ' aria-current="page"' : ''}>New post</a><a href="/posts"${active === 'posts' ? ' aria-current="page"' : ''}>Posts</a></nav>`
 }

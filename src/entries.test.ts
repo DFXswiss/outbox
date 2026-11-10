@@ -15,8 +15,8 @@ import {
 const NOW = 1_700_000_000_000
 const FUTURE = NOW + 60_000
 const PAST = NOW - 1
-const ACTOR: Actor = { user: 'user-1', account: 'account-1' }
-const APPROVER: Actor = { user: 'user-2', account: 'account-2' }
+const ACTOR: Actor = { user: 1, account: 1 }
+const APPROVER: Actor = { user: 2, account: 2 }
 const PASSED: EntryChecks = { blocking: [] }
 
 let dir: string
@@ -145,7 +145,7 @@ describe('approve and the send queue', () => {
       .prepare(
         'SELECT authoredByUser, authoredByAccount FROM scheduled_posts WHERE entryId = ?'
       )
-      .get(created.entryId) as { authoredByUser: string; authoredByAccount: string }
+      .get(created.entryId) as { authoredByUser: number; authoredByAccount: number }
     expect(row).toEqual({
       authoredByUser: ACTOR.user,
       authoredByAccount: ACTOR.account

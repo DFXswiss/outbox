@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { openDatabase } from './db'
+import { writeAudit } from './audit'
 
 const tempDirs: string[] = []
 
@@ -12,6 +13,17 @@ afterEach(() => {
 })
 
 describe('decision comment migration', () => {
+  it('stores numeric user identities separately from system audit events', () => {
+    const db = openDatabase(':memory:')
+    const event = { at: 1, event: 'published' as const, bundleId: null, entryId: null, reason: null }
+    writeAudit(db, { ...event, actorUser: null, actorAccount: null })
+    writeAudit(db, { ...event, actorUser: 17, actorAccount: 23 })
+    const rows = db.prepare('SELECT actorKind, actorUser, actorAccount FROM audit ORDER BY rowid').all()
+    expect(rows).toEqual([{ actorKind: 'system', actorUser: null, actorAccount: null }, { actorKind: 'user', actorUser: 17, actorAccount: 23 }])
+    const columns = db.pragma('table_info(bundles)') as Array<{ name: string; type: string }>
+    expect(columns.find((column) => column.name === 'authoredByAccount')?.type).toBe('INTEGER')
+    db.close()
+  })
   it('adds decisionComment to an old entries table and tolerates opening the file again', () => {
     const dir = mkdtempSync(join(tmpdir(), 'legacy-schema-'))
     tempDirs.push(dir)

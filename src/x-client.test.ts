@@ -42,6 +42,73 @@ function client(
 }
 
 describe('X publisher client', () => {
+  it.each(['token', 'users', 'upload', 'status', 'tweet'])('records rate limits from the %s endpoint', async (endpoint) => {
+    if (endpoint === 'token') db.prepare('UPDATE x_credentials SET accessTokenExpiresAt = NULL WHERE id = 1').run()
+    const x = client(async (input) => {
+      const url = String(input)
+      const target = endpoint === 'token' ? url.endsWith('/2/oauth2/token')
+        : endpoint === 'users' ? url.endsWith('/2/users/me')
+        : endpoint === 'status' ? url.includes('?command=STATUS')
+        : endpoint === 'upload' ? url.endsWith('/2/media/upload')
+        : url.endsWith('/2/tweets')
+      // Shape: https://docs.x.com/x-api/fundamentals/rate-limits
+      if (target) return new Response(JSON.stringify({ code: 88, message: 'Rate limit exceeded' }), { status: 429, headers: { 'x-rate-limit-reset': '1700000060' } })
+      // Shape: https://docs.x.com/x-api/media/upload-media
+      if (url.endsWith('/2/media/upload')) return json({ data: { id: '1880028106020515840', processing_info: { state: 'pending', check_after_secs: 0 } } })
+      // Shape: https://docs.x.com/x-api/posts/create-post
+      return json({ data: { id: '123', text: 'hello' } }, 201)
+    })
+    if (endpoint === 'users') await x.probe()
+    else await x.postTweet('hello', NOW + 20_000, endpoint === 'upload' || endpoint === 'status' ? Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]) : null)
+    expect(x.rateLimitUntil()).toBe(NOW + 60_000)
+  })
+  it.each([
+    { header: '1700000060', expected: NOW + 60_000 },
+    { header: undefined, expected: NOW + 900_000 }
+  ])('records a 429 reset with header $header', async ({ header, expected }) => {
+    // Shape: https://docs.x.com/x-api/fundamentals/rate-limits
+    const x = client(async () => new Response(JSON.stringify({ code: 88, message: 'Rate limit exceeded' }), { status: 429, headers: header ? { 'x-rate-limit-reset': header } : {} }))
+    await x.postTweet('hello', NOW + 20_000)
+    expect(x.rateLimitUntil()).toBe(expected)
+  })
+  it.each([
+    { statusData: { id: '1880028106020515840' }, succeeds: true },
+    { statusData: {}, succeeds: false },
+    { statusData: { id: '1880028106020515841' }, succeeds: false },
+    { statusData: { id: '1880028106020515841', processing_info: { state: 'succeeded' } }, succeeds: false },
+    { statusData: { id: '1880028106020515840', processing_info: null }, succeeds: false }
+  ])('accepts completed media status only for the uploaded id: $statusData', async ({ statusData, succeeds }) => {
+    let tweets = 0
+    const x = client(async (input) => {
+      const url = String(input)
+      // Shape: https://docs.x.com/x-api/media/upload-media
+      if (url.endsWith('/2/media/upload')) return json({ data: { id: '1880028106020515840', processing_info: { state: 'pending', check_after_secs: 0 } } })
+      // Shape: https://docs.x.com/x-api/media/get-media-upload-status
+      if (url.includes('?command=STATUS')) return json({ data: statusData })
+      tweets += 1
+      // Shape: https://docs.x.com/x-api/posts/create-post
+      return json({ data: { id: '123', text: 'hello' } }, 201)
+    })
+    const result = await x.postTweet('hello', NOW + 20_000, Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))
+    expect(result.result.ok).toBe(succeeds)
+    expect(tweets).toBe(succeeds ? 1 : 0)
+  })
+
+  it('includes top-level X error code and message while redacting credentials', async () => {
+    // Shape: https://docs.x.com/x-api/fundamentals/response-codes-and-errors
+    const x = client(async () => json({ code: 88, message: 'Rejected test-access-token' }, 429))
+    const response = await x.postTweet('hello', NOW + 20_000)
+    expect(response.result.error).toBe('HTTP 429: 88: Rejected [redacted]')
+  })
+
+  it('includes OAuth error and description while redacting credentials', async () => {
+    db.prepare('UPDATE x_credentials SET accessTokenExpiresAt = NULL WHERE id = 1').run()
+    // Shape: https://docs.x.com/fundamentals/authentication/oauth-2-0/authorization-code
+    const x = client(async () => json({ error: 'invalid_grant', error_description: 'Rejected test-refresh-token' }, 400))
+    const response = await x.postTweet('hello', NOW + 20_000)
+    expect(response.result.error).toBe('HTTP 400: invalid_grant: Rejected [redacted]')
+  })
+
   it('publishes a 201 response as an X permalink', async () => {
     const x = client(async () => json({ data: { id: '123', text: 'hello' } }, 201))
     await expect(x.postTweet('hello', NOW + 20_000)).resolves.toEqual({
@@ -66,14 +133,16 @@ describe('X publisher client', () => {
         const form = init!.body as FormData
         expect(form.get('media_category')).toBe('tweet_image')
         expect((form.get('media') as File).type).toBe('image/png')
-        return json({ data: { id: 'media-123' } })
+        // Shape: https://docs.x.com/x-api/media/upload-media
+        return json({ data: { id: '1880028106020515840' } })
       }
       tweetBody = JSON.parse(String(init?.body))
-      return json({ data: { id: '123' } }, 201)
+      // Shape: https://docs.x.com/x-api/posts/create-post
+      return json({ data: { id: '123', text: 'hello' } }, 201)
     })
     const result = await x.postTweet('hello', NOW + 20_000, image)
     expect(requests.map((url) => url.slice(url.lastIndexOf('/2/')))).toEqual(['/2/media/upload', '/2/tweets'])
-    expect(tweetBody).toEqual({ text: 'hello', media: { media_ids: ['media-123'] } })
+    expect(tweetBody).toEqual({ text: 'hello', media: { media_ids: ['1880028106020515840'] } })
     expect(result.result.ok).toBe(true)
   })
 
@@ -83,7 +152,8 @@ describe('X publisher client', () => {
       const url = String(input)
       if (url.endsWith('/2/media/upload')) return json({ title: 'Unavailable' }, 500)
       tweets += 1
-      return json({ data: { id: '123' } }, 201)
+      // Shape: https://docs.x.com/x-api/posts/create-post
+      return json({ data: { id: '123', text: 'hello' } }, 201)
     })
     const result = await x.postTweet('hello', NOW + 20_000, Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))
     expect(result.result).toMatchObject({ ok: false, error: 'HTTP 500: Unavailable' })
@@ -103,10 +173,11 @@ describe('X publisher client', () => {
       }
       if (url.endsWith('/2/media/upload')) {
         uploads += 1
-        return uploads === 1 ? json({ title: 'expired' }, 401) : json({ data: { id: 'media-2' } })
+        return uploads === 1 ? json({ title: 'expired' }, 401) : json({ data: { id: '1880028106020515840' } })
       }
       tweets += 1
-      return json({ data: { id: '123' } }, 201)
+      // Shape: https://docs.x.com/x-api/posts/create-post
+      return json({ data: { id: '123', text: 'hello' } }, 201)
     })
     const result = await x.postTweet('hello', NOW + 20_000, Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))
     expect(result.result.ok).toBe(true)
@@ -127,7 +198,7 @@ describe('X publisher client', () => {
       }
       if (url.endsWith('/2/media/upload')) {
         uploads += 1
-        return uploads === 1 ? json({ title: 'expired' }, 401) : json({ data: { id: 'media-4' } })
+        return uploads === 1 ? json({ title: 'expired' }, 401) : json({ data: { id: '1880028106020515840' } })
       }
       tweets += 1
       return json({ title: 'expired again' }, 401)
@@ -144,9 +215,10 @@ describe('X publisher client', () => {
     let tweets = 0
     const x = client(async (input) => {
       const url = String(input)
-      if (url.endsWith('/2/media/upload')) return json({ data: { id: 'media-3', processing_info: { state: 'failed' } } })
+      if (url.endsWith('/2/media/upload')) return json({ data: { id: '1880028106020515840', processing_info: { state: 'failed' } } })
       tweets += 1
-      return json({ data: { id: '123' } }, 201)
+      // Shape: https://docs.x.com/x-api/posts/create-post
+      return json({ data: { id: '123', text: 'hello' } }, 201)
     })
     const result = await x.postTweet('hello', NOW + 20_000, Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))
     expect(result.result).toMatchObject({ ok: false, error: 'X media processing failed.' })
@@ -238,7 +310,8 @@ describe('X publisher client', () => {
     let clockCalls = 0
     const expired = client(async () => {
       requests += 1
-      return json({ data: { id: '1' } }, 201)
+      // Shape: https://docs.x.com/x-api/posts/create-post
+      return json({ data: { id: '1', text: 'hello' } }, 201)
     }, {
       now: () => {
         clockCalls += 1
@@ -282,7 +355,8 @@ describe('X publisher client', () => {
       if (String(input).endsWith('/2/tweets')) {
         tweetRequests += 1
       }
-      return json({ data: { id: '1' } }, 201)
+      // Shape: https://docs.x.com/x-api/posts/create-post
+      return json({ data: { id: '1', text: 'hello' } }, 201)
     }, {
       now: () => {
         clockCalls += 1
@@ -320,7 +394,8 @@ describe('X publisher client', () => {
         })
       }
       tweetAuthorization = new Headers(init?.headers).get('authorization')
-      return json({ data: { id: '321' } }, 201)
+      // Shape: https://docs.x.com/x-api/posts/create-post
+      return json({ data: { id: '321', text: 'hello' } }, 201)
     })
 
     await x.postTweet('hello', NOW + 20_000)
@@ -367,7 +442,8 @@ describe('X publisher client', () => {
         return json({ title: 'expired' }, 401)
       }
       expect(loadCredentials(db)?.refreshToken).toBe('rotated-refresh-token')
-      return json({ data: { id: '456' } }, 201)
+      // Shape: https://docs.x.com/x-api/posts/create-post
+      return json({ data: { id: '456', text: 'hello' } }, 201)
     }
     const x = client(fetch, { secret: 'test-client-secret' })
     await expect(x.postTweet('hello', NOW + 20_000)).resolves.toMatchObject({
@@ -417,13 +493,14 @@ describe('X publisher client', () => {
         return json({ access_token: 'refreshed-access-token', expires_in: 7200 })
       }
       if (url.endsWith('/2/media/upload')) {
-        return json({ data: { id: 'media-123', processing_info: { state: 'pending', check_after_secs: 0 } } })
+        return json({ data: { id: '1880028106020515840', processing_info: { state: 'pending', check_after_secs: 0 } } })
       }
       if (url.includes('/2/media/upload?command=STATUS')) {
         statusChecks += 1
         return statusChecks === 1
           ? json({ title: 'expired' }, 401)
-          : json({ data: { processing_info: { state: 'succeeded' } } })
+          // Shape: https://docs.x.com/x-api/media/get-media-upload-status
+          : json({ data: { id: '1880028106020515840', processing_info: { state: 'succeeded' } } })
       }
       tweets += 1
       return json({ title: 'unauthorized' }, 401)

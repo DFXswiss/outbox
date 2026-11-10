@@ -3,14 +3,14 @@ import { createHmac, timingSafeEqual } from 'node:crypto'
 export type Role = 'OUTBOX' | 'ADMIN'
 
 export type Identity = {
-  user: string
-  account: string
+  user: number
+  account: number
   role: Role
 }
 
 /**
  * DFX hierarchy, not recursive. ADMIN fulfills OUTBOX; OUTBOX does not
- * fulfill ADMIN. SUPER_ADMIN is mapped to ADMIN before this sees it.
+ * fulfill ADMIN. Backend SuperAdmin is mapped to ADMIN before this sees it.
  */
 export function hasRoleAccess(needed: Role, actual: Role): boolean {
   if (actual === needed) return true
@@ -18,7 +18,7 @@ export function hasRoleAccess(needed: Role, actual: Role): boolean {
   return false
 }
 
-export type IntrospectResult = ({ ok: true } & Identity) | { ok: false; status: number }
+export type IntrospectResult = ({ ok: true } & Identity) | { ok: false; status: number; reason?: 'tfa-required' | 'staff-kyc-required' | 'forbidden' }
 
 /**
  * Identity seam. Callers (the HTTP surface) never talk to a network;
@@ -26,10 +26,10 @@ export type IntrospectResult = ({ ok: true } & Identity) | { ok: false; status: 
  */
 export type Introspect = (token: string, role: Role) => Promise<IntrospectResult>
 
-function decodeJwtHs256(
+export function decodeJwtHs256(
   token: string,
   secret: string
-): { address: unknown; user: unknown; account: unknown; role?: unknown } | null {
+): { address: unknown; user: unknown; account: unknown; role?: unknown; exp: unknown; tfaRequired: unknown } | null {
   const parts = token.split('.')
   if (parts.length !== 3) return null
   const [headerB64, payloadB64, sigB64] = parts
@@ -60,12 +60,22 @@ function decodeJwtHs256(
   }
   if (payload === null || typeof payload !== 'object' || Array.isArray(payload)) return null
   const rec = payload as Record<string, unknown>
-  return { address: rec.address, user: rec.user, account: rec.account, role: rec.role }
+  return { address: rec.address, user: rec.user, account: rec.account, role: rec.role, exp: rec.exp, tfaRequired: rec.tfaRequired }
+}
+
+export function validJwtClaims(claims: ReturnType<typeof decodeJwtHs256>, now = Date.now()): boolean {
+  return claims !== null && typeof claims.address === 'string' && claims.address.trim() !== '' &&
+    positiveId(claims.user) && positiveId(claims.account) &&
+    typeof claims.exp === 'number' && Number.isFinite(claims.exp) && claims.exp * 1000 > now
+}
+
+function positiveId(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value > 0
 }
 
 function roleFromPayload(value: unknown): Role | null {
-  if (value === 'OUTBOX') return 'OUTBOX'
-  if (value === 'ADMIN' || value === 'SUPER_ADMIN') return 'ADMIN'
+  if (value === 'Outbox') return 'OUTBOX'
+  if (value === 'Admin' || value === 'SuperAdmin') return 'ADMIN'
   return null
 }
 
@@ -88,15 +98,7 @@ export function createHttpIntrospect(options: HttpIntrospectOptions): Introspect
     let verifiedClaims: ReturnType<typeof decodeJwtHs256> = null
     if (options.jwtSecret !== undefined && options.jwtSecret !== '') {
       const claims = decodeJwtHs256(token, options.jwtSecret)
-      if (
-        claims === null ||
-        typeof claims.address !== 'string' ||
-        claims.address === '' ||
-        typeof claims.user !== 'string' ||
-        claims.user === '' ||
-        typeof claims.account !== 'string' ||
-        claims.account === ''
-      ) {
+      if (!validJwtClaims(claims)) {
         return { ok: false, status: 401 }
       }
       verifiedClaims = claims
@@ -115,6 +117,12 @@ export function createHttpIntrospect(options: HttpIntrospectOptions): Introspect
       return { ok: false, status: 502 }
     }
     if (response.status !== 200) {
+      if (response.status === 403) {
+        let body: unknown
+        try { body = await response.json() } catch { body = null }
+        const code = body && typeof body === 'object' ? (body as Record<string, unknown>).code : undefined
+        return { ok: false, status: 403, reason: code === 'TFA_REQUIRED' ? 'tfa-required' : code === 'STAFF_KYC_REQUIRED' ? 'staff-kyc-required' : 'forbidden' }
+      }
       return { ok: false, status: response.status === 0 ? 502 : response.status }
     }
 
@@ -128,7 +136,7 @@ export function createHttpIntrospect(options: HttpIntrospectOptions): Introspect
       return { ok: false, status: 502 }
     }
     const rec = body as Record<string, unknown>
-    if (typeof rec.user !== 'string' || typeof rec.account !== 'string') {
+    if (!positiveId(rec.user) || !positiveId(rec.account)) {
       return { ok: false, status: 502 }
     }
     if (

@@ -7,8 +7,8 @@ const SCHEMA = `
 CREATE TABLE IF NOT EXISTS bundles (
   id TEXT PRIMARY KEY,
   createdAt INTEGER NOT NULL,
-  authoredByUser TEXT NOT NULL,
-  authoredByAccount TEXT NOT NULL
+  authoredByUser INTEGER NOT NULL,
+  authoredByAccount INTEGER NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS entries (
@@ -20,8 +20,8 @@ CREATE TABLE IF NOT EXISTS entries (
   imageSha256 TEXT,
   contentHash TEXT NOT NULL,
   checks TEXT,
-  decidedByUser TEXT,
-  decidedByAccount TEXT,
+  decidedByUser INTEGER,
+  decidedByAccount INTEGER,
   decidedAt INTEGER,
   decisionComment TEXT
 );
@@ -35,8 +35,8 @@ CREATE TABLE IF NOT EXISTS scheduled_posts (
   startedAt INTEGER,
   createdAt INTEGER NOT NULL,
   updatedAt INTEGER NOT NULL,
-  authoredByUser TEXT NOT NULL,
-  authoredByAccount TEXT NOT NULL,
+  authoredByUser INTEGER NOT NULL,
+  authoredByAccount INTEGER NOT NULL,
   UNIQUE (entryId, channel)
 );
 
@@ -65,9 +65,18 @@ CREATE TABLE IF NOT EXISTS audit (
   event TEXT NOT NULL,
   bundleId TEXT,
   entryId TEXT,
-  actorUser TEXT NOT NULL,
-  actorAccount TEXT NOT NULL,
-  reason TEXT
+  actorKind TEXT NOT NULL CHECK (actorKind IN ('user', 'system')),
+  actorUser INTEGER,
+  actorAccount INTEGER,
+  reason TEXT,
+  CHECK ((actorKind = 'system' AND actorUser IS NULL AND actorAccount IS NULL) OR
+         (actorKind = 'user' AND actorUser IS NOT NULL AND actorAccount IS NOT NULL))
+);
+
+CREATE TABLE IF NOT EXISTS auth_pending (
+  id TEXT PRIMARY KEY,
+  token TEXT NOT NULL,
+  createdAt INTEGER NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS media (

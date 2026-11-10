@@ -31,6 +31,7 @@ let stubPort
 let written = []
 let preservedStageRoot = null
 let xTweetSequence = 1_000_000_000
+let tfaMode = 'setup'
 const xResponses = new Map([
   ['The shipment update is ready for review.', 'flight'],
   ['The weekly schedule is ready to share.', 'failed'],
@@ -40,10 +41,11 @@ const xResponses = new Map([
 
 function fail(message) { throw new Error(message) }
 
-function jwt(role, account = 'handbook-composer') {
+function jwt(role, account = 1) {
   const encode = (value) => Buffer.from(JSON.stringify(value)).toString('base64url')
   const header = encode({ alg: 'HS256', typ: 'JWT' })
-  const payload = encode({ address: 'handbook@example.invalid', user: 'handbook-user', account, role })
+  // Shape: the DFX API, src/shared/auth/jwt-payload.interface.ts
+  const payload = encode({ address: 'handbook@example.invalid', user: 1, account, role: role === 'ADMIN' ? 'Admin' : 'Outbox', exp: 4102444800, tfaRequired: true })
   const signature = createHmac('sha256', secret).update(`${header}.${payload}`).digest('base64url')
   return `${header}.${payload}.${signature}`
 }
@@ -77,14 +79,31 @@ async function startStub() {
       const claims = bearer?.split('.')[1]
       if (!claims) return writeJson(response, 401, { message: 'Sign in required.' })
       const identity = JSON.parse(Buffer.from(claims, 'base64url').toString('utf8'))
-      if (url.pathname.endsWith('/admin') && identity.role !== 'ADMIN') return writeJson(response, 403, { message: 'Not allowed.' })
+      // Captured from a locally running DFX API (ENVIRONMENT=loc) on 2026-11-09
+      if (tfaMode === 'kyc') return writeJson(response, 403, { code: 'STAFF_KYC_REQUIRED', message: 'Staff access requires a verified name on your account' })
+      // Captured from a locally running DFX API (ENVIRONMENT=loc) on 2026-11-09
+      if (url.pathname.endsWith('/admin') && identity.role !== 'Admin') return writeJson(response, 403, { statusCode: 403, message: 'Forbidden resource', error: 'Forbidden' })
+      // Shape: the DFX API, GET /v1/auth/introspect/{admin,outbox} contract
       return writeJson(response, 200, { user: identity.user, account: identity.account, role: identity.role })
     }
+    // Shapes: the DFX API, /v1/auth/mail and /v1/auth/2fa contracts
+    if (url.pathname === '/v1/auth/mail') return writeJson(response, 201, {})
+    if (url.pathname === '/v1/auth/2fa/verify') return writeJson(response, tfaMode === 'wrong' ? 400 : 201, {})
+    if (url.pathname === '/v1/auth/2fa') {
+      // Captured from a locally running DFX API (ENVIRONMENT=loc) on 2026-11-09
+      if (request.method === 'GET') return writeJson(response, 403, { code: 'TFA_REQUIRED', message: '2FA required (strict)', level: 'strict' })
+      if (tfaMode === 'setup') return writeJson(response, 201, { type: 'App', secret: 'HANDOFFEXAMPLE', uri: 'otpauth://totp/Outbox?secret=HANDOFFEXAMPLE' })
+      // Captured from a locally running DFX API (ENVIRONMENT=loc) on 2026-11-09
+      return writeJson(response, 409, { statusCode: 409, message: '2FA already set up', error: 'Conflict' })
+    }
+    // Shape: https://docs.x.com/fundamentals/authentication/oauth-2-0/authorization-code
     if (url.pathname === '/2/oauth2/token') return writeJson(response, 200, { access_token: 'handbook-access-token', refresh_token: 'handbook-refresh-token', expires_in: 7200 })
-    if (url.pathname === '/2/users/me') return writeJson(response, 200, { data: { username: 'handbook_demo' } })
+    // Shape: https://docs.x.com/x-api/users/get-my-user
+    if (url.pathname === '/2/users/me') return writeJson(response, 200, { data: { id: '123', name: 'Handbook', username: 'handbook_demo' } })
     if (url.pathname === '/2/media/upload' && request.method === 'POST') {
       await readRequestBody(request)
-      return writeJson(response, 200, { data: { id: 'handbook-media-1', media_key: '3_1' } })
+      // Shape: https://docs.x.com/x-api/media/upload-media
+      return writeJson(response, 200, { data: { id: '1880028106020515840', media_key: '3_1' } })
     }
     if (url.pathname === '/2/tweets' && request.method === 'POST') {
       const body = JSON.parse(await readRequestBody(request))
@@ -96,7 +115,8 @@ async function startStub() {
       if (responseType === 'failed') return writeJson(response, 400, { title: 'Invalid request', detail: 'Fixture failure.' })
       if (responseType === 'uncertain') return writeJson(response, 500, { title: 'Temporary error' })
       const id = `${xTweetSequence++}`
-      return writeJson(response, 201, { data: { id } })
+      // Shape: https://docs.x.com/x-api/posts/create-post
+      return writeJson(response, 201, { data: { id, text: body.text } })
     }
     response.writeHead(404)
     response.end('Not found')
@@ -133,6 +153,7 @@ async function startApp({ missingPack = false } = {}) {
       PACK_ROOT: packRoot,
       BRAND: 'handbook',
       DFX_API_BASE_URL: `http://127.0.0.1:${stubPort}`,
+      OUTBOX_PUBLIC_URL: `http://127.0.0.1:${appPort}`,
       JWT_SECRET: secret,
       X_CLIENT_ID: 'handbook-client',
       X_CLIENT_SECRET: 'handbook-secret',
@@ -166,7 +187,7 @@ async function playwright() {
   }
 }
 
-async function context(role, account = 'handbook-composer') {
+async function context(role, account = 1) {
   const browserContext = await browser.newContext({ viewport, deviceScaleFactor, locale: 'en-GB', timezoneId: 'Europe/Zurich', extraHTTPHeaders: { authorization: `Bearer ${jwt(role, account)}` } })
   return { context: browserContext, page: await browserContext.newPage() }
 }
@@ -369,7 +390,7 @@ async function clickDecision(page, decision) {
   await request
 }
 
-async function resultFromRealResponse(page, method, path, { role = 'ADMIN', account = 'handbook-composer', body = '', origin, cookie, unauthenticated = false, expectedStatus } = {}) {
+async function resultFromRealResponse(page, method, path, { role = 'ADMIN', account = 1, body = '', origin, cookie, unauthenticated = false, expectedStatus } = {}) {
   const headers = unauthenticated ? {} : { authorization: `Bearer ${jwt(role, account)}` }
   if (body) headers['content-type'] = 'application/x-www-form-urlencoded'
   if (origin) headers.origin = origin
@@ -405,7 +426,7 @@ async function captureStaticErrors(composer, approver) {
   const page = await approver.context.newPage()
   await page.goto(`http://127.0.0.1:${appPort}/`)
   await page.evaluate(() => { document.cookie = 'outbox=invalid; path=/' })
-  await resultFromRealResponse(page, 'GET', '/', { unauthenticated: true, expectedStatus: 401 })
+  await resultFromRealResponse(page, 'POST', '/api/submit', { unauthenticated: true, body: 'text=Fixture', expectedStatus: 401 })
   await capture(page, '04-results-and-errors', '06-sign-in-required', ['Sign in required'])
 
   await resultFromRealResponse(page, 'POST', '/api/submit', { role: 'OUTBOX', body: 'text=Fixture&scheduledAt=2030-01-01T10%3A00' , cookie: `outbox=${encodeURIComponent(jwt('OUTBOX'))}`, origin: 'https://example.invalid', expectedStatus: 403 })
@@ -415,7 +436,7 @@ async function captureStaticErrors(composer, approver) {
   await capture(page, '04-results-and-errors', '08-not-found', ['Request failed', 'Not found.'])
 
   const privateEntry = await submit(composer, 'A neutral private example for visibility.', zonedDate(10, true))
-  await resultFromRealResponse(page, 'GET', `/review/${privateEntry.bundleId}`, { role: 'OUTBOX', account: 'other-handbook-composer', expectedStatus: 403 })
+  await resultFromRealResponse(page, 'GET', `/review/${privateEntry.bundleId}`, { role: 'OUTBOX', account: 2, expectedStatus: 403 })
   await capture(page, '04-results-and-errors', '09-not-visible', ['Request failed', 'Not visible.'])
 
   await resultFromRealResponse(page, 'POST', `/review/${privateEntry.bundleId}/decide`, { role: 'OUTBOX', body: 'decision=approve', expectedStatus: 403 })
@@ -440,6 +461,29 @@ async function main() {
   browser = await chromium.launch({ headless: true, args: ['--lang=en-GB'] })
   const composer = await context('OUTBOX')
   const approver = await context('ADMIN')
+
+  const loginContext = await browser.newContext({ viewport, deviceScaleFactor })
+  const loginPage = await loginContext.newPage()
+  await loginPage.goto(`http://127.0.0.1:${appPort}/login`)
+  await capture(loginPage, '06-login', '01-login', ['Sign in with email', 'Sign in with wallet'])
+  await loginPage.locator('#mail').fill('test@example.invalid')
+  await Promise.all([loginPage.waitForNavigation(), loginPage.locator('form[action="/auth/mail"] button').click()])
+  await capture(loginPage, '06-login', '02-mail-sent', ['Open the link in the email to continue'])
+  await loginPage.goto(`http://127.0.0.1:${appPort}/auth/callback?session=${encodeURIComponent(jwt('OUTBOX'))}`)
+  await capture(loginPage, '06-login', '03-tfa-setup', ['HANDOFFEXAMPLE', 'six-digit code'])
+  tfaMode = 'configured'
+  await loginPage.reload()
+  await capture(loginPage, '06-login', '04-tfa-code', ['six-digit code'])
+  tfaMode = 'wrong'
+  await loginPage.locator('#code').fill('123456')
+  await Promise.all([loginPage.waitForNavigation(), loginPage.locator('form[action="/auth/tfa"] button').click()])
+  await capture(loginPage, '06-login', '05-tfa-wrong', ['Invalid code'])
+  tfaMode = 'kyc'
+  await loginPage.locator('#code').fill('123456')
+  await Promise.all([loginPage.waitForNavigation(), loginPage.locator('form[action="/auth/tfa"] button').click()])
+  await capture(loginPage, '06-login', '06-kyc', ['no verified name'])
+  tfaMode = 'configured'
+  await loginContext.close()
 
   await composer.page.goto(`http://127.0.0.1:${appPort}/`)
   const language = await composer.page.evaluate(() => navigator.language)
@@ -628,7 +672,7 @@ async function main() {
   app = originalApp
   appPort = originalAppPort
 
-  const secondAuthor = await context('OUTBOX', 'handbook-second-author')
+  const secondAuthor = await context('OUTBOX', 3)
   const otherAuthorPost = await submit(secondAuthor, 'A separate author update for the approver list.')
   if (!otherAuthorPost.bundleId) fail('Second author submission did not open its review page')
   const approverPosts = await approver.context.newPage()

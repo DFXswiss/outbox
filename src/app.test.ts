@@ -29,6 +29,7 @@ function fakeFetch(): typeof fetch {
   return async (input) => {
     const url = new URL(String(input))
     if (url.pathname === '/2/oauth2/token') {
+      // Shape: https://docs.x.com/fundamentals/authentication/oauth-2-0/authorization-code
       return new Response(JSON.stringify({
         access_token: 'test-access-token',
         refresh_token: 'rotated-test-refresh-token',
@@ -41,9 +42,10 @@ function fakeFetch(): typeof fetch {
       })
     }
     if (url.pathname === '/2/users/me') {
+      // Shape: https://docs.x.com/x-api/users/get-my-user
       return new Response(JSON.stringify({
         data: {
-          id: 'test-user-id',
+          id: '123',
           name: 'Test User',
           username: 'test_handle'
         }
@@ -106,6 +108,7 @@ async function healthFor(
     PACK_ROOT: packRootPath(root),
     BRAND: brand,
     DFX_API_BASE_URL: 'https://identity.invalid',
+    OUTBOX_PUBLIC_URL: 'https://outbox.invalid',
     JWT_SECRET: 'test-jwt-secret',
     X_CLIENT_ID: 'test-client-id',
     X_REFRESH_TOKEN: 'test-refresh-token',
@@ -194,6 +197,7 @@ describe('buildApp identity verification', () => {
       PACK_ROOT: root,
       BRAND,
       DFX_API_BASE_URL: 'https://identity.invalid',
+      OUTBOX_PUBLIC_URL: 'https://outbox.invalid',
       JWT_SECRET: TEST_JWT_SECRET,
       X_CLIENT_ID: 'test-client-id',
       X_HANDLE: 'test_handle',
@@ -210,10 +214,11 @@ describe('buildApp identity verification', () => {
       const path = new URL(String(input)).pathname
       if (path.startsWith('/v1/auth/introspect/')) {
         introspectionCalls += 1
+        // Shape: the DFX API, src/shared/auth/jwt-payload.interface.ts
         return new Response(JSON.stringify({
-          user: 'verified-user',
-          account: 'verified-account',
-          role: 'OUTBOX'
+          user: 1,
+          account: 1,
+          role: 'Outbox'
         }), {
           status: 200,
           headers: { 'content-type': 'application/json' }
@@ -230,14 +235,14 @@ describe('buildApp identity verification', () => {
       const port = await listen(server)
       const wrongSecretToken = signedToken({
         address: 'test-address',
-        user: 'verified-user',
-        account: 'verified-account',
-        role: 'OUTBOX'
+        user: 1,
+        account: 1,
+        role: 'Outbox', exp: 4_102_444_800
       }, 'different-test-secret')
       const invalidAddressToken = signedToken({
-        user: 'verified-user',
-        account: 'verified-account',
-        role: 'OUTBOX'
+        user: 1,
+        account: 1,
+        role: 'Outbox', exp: 4_102_444_800
       })
       for (const token of [wrongSecretToken, invalidAddressToken]) {
         const rejected = await globalThis.fetch(`http://127.0.0.1:${port}/api/me`, {
@@ -249,9 +254,9 @@ describe('buildApp identity verification', () => {
 
       const validToken = signedToken({
         address: 'test-address',
-        user: 'verified-user',
-        account: 'verified-account',
-        role: 'OUTBOX'
+        user: 1,
+        account: 1,
+        role: 'Outbox', exp: 4_102_444_800
       })
       const accepted = await globalThis.fetch(`http://127.0.0.1:${port}/api/me`, {
         headers: { authorization: `Bearer ${validToken}` }

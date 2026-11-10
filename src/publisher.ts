@@ -13,6 +13,7 @@ export type PublisherDeps = {
   db: SqliteDatabase
   x: {
     probe(): Promise<'ok' | 'bad'>
+    rateLimitUntil?(): number
     postTweet(
       text: string,
       deadlineMs: number,
@@ -51,6 +52,12 @@ export function createPublisher(deps: PublisherDeps) {
     lastProbeAt = now()
     try {
       state = await deps.x.probe()
+      const reset = deps.x.rateLimitUntil?.() ?? 0
+      if (reset > now()) {
+        state = 'bad'
+        deps.alert({ kind: 'failed', detail: `X rate limit resets at ${new Date(reset).toISOString()}` })
+        lastProbeAt = Number.NEGATIVE_INFINITY
+      }
     } catch {
       state = 'bad'
     }
@@ -65,6 +72,7 @@ export function createPublisher(deps: PublisherDeps) {
     const run = async () => {
       let post: ClaimedPost | null
       try {
+        if ((deps.x.rateLimitUntil?.() ?? 0) > now()) return
         if (state !== 'ok') {
           if (now() - lastProbeAt < reprobeMs) {
             return
@@ -141,12 +149,17 @@ export function createPublisher(deps: PublisherDeps) {
           state = 'bad'
           lastProbeAt = now()
         }
+        const reset = deps.x.rateLimitUntil?.() ?? 0
+        if (reset > now()) {
+          state = 'bad'
+          lastProbeAt = Number.NEGATIVE_INFINITY
+        }
         try {
           if (finished.status === 'failed' || finished.status === 'uncertain') {
             deps.alert({
               kind: finished.status,
               postId: post.postId,
-              detail: result!.error ?? finished.status
+              detail: `${result!.error ?? finished.status}${reset > now() ? `; X rate limit resets at ${new Date(reset).toISOString()}` : ''}`
             })
           }
           if (needsLogin) {
@@ -259,7 +272,7 @@ export function createPublisher(deps: PublisherDeps) {
     start,
     stop,
     running: () => active,
-    probeState: () => state,
+    probeState: () => (deps.x.rateLimitUntil?.() ?? 0) > now() ? 'bad' : state,
     tick
   }
 }

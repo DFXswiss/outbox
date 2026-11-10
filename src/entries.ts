@@ -9,8 +9,8 @@ import type { ChannelId, EntryState } from './status'
 const QUEUE_CHANNEL: ChannelId = 'x'
 
 export type Actor = {
-  user: string
-  account: string
+  user: number
+  account: number
 }
 
 /**
@@ -66,8 +66,8 @@ type EntryRow = {
   imageSha256: string | null
   contentHash: string
   checks: string | null
-  decidedByUser: string | null
-  decidedByAccount: string | null
+  decidedByUser: number | null
+  decidedByAccount: number | null
   decidedAt: number | null
 }
 
@@ -350,7 +350,7 @@ export function decideEntry(db: SqliteDatabase, input: DecideInput): DecideResul
       if (input.decision === 'approve') {
         const author = db
           .prepare('SELECT authoredByUser, authoredByAccount FROM bundles WHERE id = ?')
-          .get(entry.bundleId) as { authoredByUser: string; authoredByAccount: string }
+          .get(entry.bundleId) as { authoredByUser: number; authoredByAccount: number }
         db.prepare(
           `INSERT INTO scheduled_posts (
              id, entryId, channel, status, createdAt, updatedAt,

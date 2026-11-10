@@ -90,7 +90,10 @@ function errorDetail(
   const values: string[] = [`HTTP ${status}`]
   if (body && typeof body === 'object' && !Array.isArray(body)) {
     const record = body as Record<string, unknown>
-    for (const key of ['title', 'detail']) {
+    if (typeof record.code === 'number' && Number.isInteger(record.code)) {
+      values.push(String(record.code))
+    }
+    for (const key of ['title', 'detail', 'message', 'error', 'error_description']) {
       if (typeof record[key] === 'string') {
         values.push(record[key] as string)
       }
@@ -152,6 +155,7 @@ export function createXClient(options: XClientOptions) {
   const now = options.now ?? (() => Date.now())
   const root = (options.apiBase ?? 'https://api.x.com').replace(/\/$/, '')
   let refreshFlight: Promise<string> | null = null
+  let rateLimitReset = 0
 
   async function request(
     url: string,
@@ -169,7 +173,14 @@ export function createXClient(options: XClientOptions) {
       signal: AbortSignal.timeout(remaining)
     }
     onDispatch?.()
-    return fetchImpl(url, requestInit)
+    const response = await fetchImpl(url, requestInit)
+    if (response.status === 429) {
+      const raw = response.headers.get('x-rate-limit-reset')
+      const seconds = raw && /^\d+$/.test(raw) ? Number(raw) : NaN
+      const reset = Number.isSafeInteger(seconds) && seconds * 1000 > now() && seconds * 1000 <= 8_640_000_000_000_000 ? seconds * 1000 : now() + 900_000
+      rateLimitReset = Math.max(rateLimitReset, reset)
+    }
+    return response
   }
 
   async function refresh(deadlineMs: number): Promise<string> {
@@ -393,9 +404,13 @@ export function createXClient(options: XClientOptions) {
           try { statusBody = await statusResponse.json() } catch { statusBody = null }
           if (!statusResponse.ok) return { result: { channel: 'x', ok: false, error: errorDetail(statusResponse.status, statusBody, credentialSecrets(token, loadCredentials(options.db)?.refreshToken ?? '', options.clientId, options.clientSecret)) }, needsLogin: statusResponse.status === 401 }
           const statusData = statusBody && typeof statusBody === 'object' ? (statusBody as Record<string, unknown>).data : null
-          processing = statusData && typeof statusData === 'object' ? (statusData as Record<string, unknown>).processing_info : null
-          if (!processing) return { result: { channel: 'x', ok: false, error: 'Invalid X media status response.' }, needsLogin: false }
+          if (!statusData || typeof statusData !== 'object' || Array.isArray(statusData) || (statusData as Record<string, unknown>).id !== mediaId) {
+            return { result: { channel: 'x', ok: false, error: 'Invalid X media status response.' }, needsLogin: false }
+          }
+          processing = (statusData as Record<string, unknown>).processing_info
+          if (processing === undefined) break
           if (typeof processing !== 'object' || Array.isArray(processing)) return { result: { channel: 'x', ok: false, error: 'Invalid X media status response.' }, needsLogin: false }
+          if (processing === null) return { result: { channel: 'x', ok: false, error: 'Invalid X media status response.' }, needsLogin: false }
         }
       } catch (error) {
         return { result: { channel: 'x', ok: false, error: safeError(error) }, needsLogin: false }
@@ -522,5 +537,5 @@ export function createXClient(options: XClientOptions) {
     return { result: { channel: 'x', ok: false, error }, needsLogin: false }
   }
 
-  return { probe, postTweet, ensureAccessToken }
+  return { probe, postTweet, ensureAccessToken, rateLimitUntil: () => rateLimitReset }
 }

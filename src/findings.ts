@@ -6,6 +6,7 @@ import {
   type TopicRules
 } from '../review/engine'
 import type { EntryChecks } from './entries'
+import twitterText from 'twitter-text'
 
 export function loadPackRules(packRoot: string, brand: string): TopicRules | null {
   try {
@@ -20,12 +21,14 @@ export type ReviewRun =
   | { ok: true; checks: EntryChecks }
 
 /** Checks deterministic blocking wording rules; factual truth is outside this review. */
-export function reviewText(packRoot: string, brand: string, text: string): ReviewRun {
+export function reviewText(packRoot: string, brand: string, text: string, maxWeightedLength = 25_000): ReviewRun {
   const rules = loadPackRules(packRoot, brand)
   if (rules === null) return { ok: false, reason: 'missing-pack' }
 
   const entries = [{ id: 'draft', postText: text, templateParams: {} }]
   const blocking: string[] = []
+  const count = characterCount(text)
+  if (count > maxWeightedLength) blocking.push(`Text is longer than X allows for this account (${count} of ${maxWeightedLength} characters).`)
   for (const hit of checkForbiddenClaims(entries, rules)) {
     blocking.push(`Forbidden claim: ${hit.match}`)
   }
@@ -41,7 +44,7 @@ export function reviewText(packRoot: string, brand: string, text: string): Revie
 }
 
 export function characterCount(text: string): number {
-  return [...text].length
+  return twitterText.parseTweet(text).weightedLength
 }
 
 export function costHint(text: string): string {

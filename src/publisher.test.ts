@@ -11,8 +11,8 @@ import type { PublishResult } from './status'
 
 const NOW = 1_700_000_000_000
 const SETUP_NOW = NOW - 60_000
-const ACTOR = { user: 'author', account: 'account' }
-const ADMIN = { user: 'admin', account: 'admin-account' }
+const ACTOR = { user: 1, account: 1 }
+const ADMIN = { user: 2, account: 2 }
 let dir: string
 let db: SqliteDatabase
 let clock: { now: number }
@@ -85,6 +85,38 @@ function status(postId: string): string {
 }
 
 describe('serial publisher', () => {
+  it('does not claim another post until the X rate limit has reset', async () => {
+    const first = approve('first due', NOW - 1)
+    const second = approve('second due', NOW)
+    const alerts: Alert[] = []
+    let reset = 0
+    let sends = 0
+    const publisher = createPublisher({
+      db, now: () => clock.now, intervalMs: 1_000_000,
+      x: {
+        probe: async () => 'ok', rateLimitUntil: () => reset,
+        postTweet: async () => {
+          sends += 1
+          reset = NOW + 60_000
+          return { result: { channel: 'x', ok: false, error: 'HTTP 429' }, needsLogin: false }
+        }
+      },
+      alert: (alert) => alerts.push(alert), log: () => {}
+    })
+    await publisher.start()
+    await publisher.tick()
+    expect(status(first.id)).toBe('failed')
+    expect(publisher.probeState()).toBe('bad')
+    expect(alerts[0]?.detail).toContain(new Date(reset).toISOString())
+    await publisher.tick()
+    expect(status(second.id)).toBe('pending')
+    expect(sends).toBe(1)
+    clock.now = reset
+    await publisher.tick()
+    await publisher.tick()
+    expect(sends).toBe(2)
+    await publisher.stop()
+  })
   it('clears running state when boot interruption alerts fail', async () => {
     approve('interrupted post', NOW)
     claimNextDue(db, NOW)

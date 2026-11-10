@@ -1,4 +1,5 @@
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { createHmac } from 'node:crypto'
 import type { Server } from 'node:http'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -7,7 +8,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { openDatabase, type SqliteDatabase } from './db'
 import { submitSubmission } from './entries'
 import { imageSha256 } from './content-hash'
-import type { Identity, Introspect } from './identity'
+import { createHttpIntrospect, type Identity, type Introspect } from './identity'
 import {
   createOutboxServer,
   sessionCookie,
@@ -30,10 +31,10 @@ const SEKRIT_BEARER = 'sekrit-bearer-aabbcc'
 const SEKRIT_COOKIE = 'sekrit-cookie-xxyyzz'
 
 const PEOPLE: Record<string, Identity> = {
-  [TOKEN_A]: { user: 'user-a', account: 'account-a', role: 'OUTBOX' },
-  [TOKEN_B]: { user: 'user-b', account: 'account-b', role: 'OUTBOX' },
-  [TOKEN_ADMIN]: { user: 'user-admin', account: 'account-admin', role: 'ADMIN' },
-  [SEKRIT_BEARER]: { user: 'user-a', account: 'account-a', role: 'OUTBOX' }
+  [TOKEN_A]: { user: 1, account: 1, role: 'OUTBOX' },
+  [TOKEN_B]: { user: 2, account: 2, role: 'OUTBOX' },
+  [TOKEN_ADMIN]: { user: 3, account: 3, role: 'ADMIN' },
+  [SEKRIT_BEARER]: { user: 1, account: 1, role: 'OUTBOX' }
 }
 
 const introspect: Introspect = async (token, role) => {
@@ -52,6 +53,13 @@ type Harness = {
 }
 
 const harnesses: Harness[] = []
+
+function mailToken(overrides: Record<string, unknown> = {}): string {
+  const encode = (value: unknown) => Buffer.from(JSON.stringify(value)).toString('base64url')
+  // Shape: the DFX API, src/shared/auth/jwt-payload.interface.ts
+  const payload = `${encode({ alg: 'HS256' })}.${encode({ address: 'wallet', user: 1, account: 1, role: 'Outbox', exp: 4102444800, tfaRequired: true, ...overrides })}`
+  return `${payload}.${createHmac('sha256', 'test-jwt-secret').update(payload).digest('base64url')}`
+}
 const FONT_DIRECTORY = join(dirname(fileURLToPath(import.meta.url)), 'assets', 'fonts')
 
 function assertServerRequiresBrand(
@@ -97,6 +105,8 @@ async function start(
     probeX?: () => 'ok' | 'bad'
     introspect?: Introspect
     publisher?: { running(): boolean }
+    fetch?: typeof fetch
+    xMaxWeightedLength?: number
   } = {}
 ): Promise<Harness> {
   const dir = mkdtempSync(join(tmpdir(), 'outbox-surface-'))
@@ -123,6 +133,10 @@ async function start(
     db,
     packRoot,
     brand: 'dfx',
+    dfxApiBaseUrl: 'https://identity.invalid',
+    outboxPublicUrl: 'https://outbox.invalid',
+    fetch: opts.fetch,
+    xMaxWeightedLength: opts.xMaxWeightedLength,
     introspect: opts.introspect ?? introspect,
     now: () => clock.now,
     jwtSecret: opts.jwtSecret ?? 'test-jwt-secret',
@@ -197,6 +211,189 @@ function submitJson(
     body: JSON.stringify(body)
   })
 }
+
+describe('mail login', () => {
+  it('rejects the callback when JWT verification is not configured', async () => {
+    const h = await start({ jwtSecret: '' })
+    const result = await call(h.port, `/auth/callback?session=${encodeURIComponent(mailToken())}`)
+    expect(result.status).toBe(503)
+    expect(result.text).toContain('Sign-in is not configured.')
+    expect(h.db.prepare('SELECT * FROM auth_pending').all()).toHaveLength(0)
+  })
+  it('does not disclose a backend mail failure', async () => {
+    // Captured from a locally running DFX API (ENVIRONMENT=loc) on 2026-11-09
+    const h = await start({ fetch: async () => Response.json({ statusCode: 403, message: 'Forbidden resource', error: 'Forbidden' }, { status: 403 }) })
+    const result = await call(h.port, '/auth/mail', { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: 'mail=a%40example.invalid' })
+    expect(result.status).toBe(502)
+    expect(result.text).not.toContain('Forbidden resource')
+  })
+
+  it('rejects an unsigned or altered callback token', async () => {
+    const h = await start()
+    const token = `${mailToken()}x`
+    const result = await call(h.port, `/auth/callback?session=${encodeURIComponent(token)}`)
+    expect(result.status).toBe(401)
+    expect(h.db.prepare('SELECT * FROM auth_pending').all()).toHaveLength(0)
+    expect(h.logs.join('\n')).not.toContain(token)
+  })
+
+  it('rejects a validly signed mail callback without the TFA requirement', async () => {
+    const h = await start()
+    const token = mailToken({ tfaRequired: false })
+    expect((await call(h.port, `/auth/callback?session=${encodeURIComponent(token)}`)).status).toBe(401)
+    expect(h.db.prepare('SELECT * FROM auth_pending').all()).toHaveLength(0)
+  })
+
+  it('shows only the code field when setup says it already exists', async () => {
+    const h = await start({ fetch: async (_input, init) => {
+      // Captured from a locally running DFX API (ENVIRONMENT=loc) on 2026-11-09
+      return init?.method === 'POST' ? Response.json({ statusCode: 409, message: '2FA already set up', error: 'Conflict' }, { status: 409 }) : Response.json({ code: 'TFA_REQUIRED', message: '2FA required (strict)', level: 'strict' }, { status: 403 })
+    } })
+    const callback = await call(h.port, `/auth/callback?session=${encodeURIComponent(mailToken())}`)
+    const cookie = callback.headers.get('set-cookie')!.split(';')[0]!
+    const result = await call(h.port, '/auth/tfa', { headers: { cookie } })
+    expect(result.status).toBe(200)
+    expect(result.text).toContain('name="code"')
+    expect(result.text).not.toContain('Secret:')
+  })
+  it('redirects anonymous HTML to login while API requests remain JSON 401', async () => {
+    const h = await start()
+    const html = await call(h.port, '/')
+    const api = await call(h.port, '/api/me')
+    expect(html.status).toBe(302)
+    expect(html.location).toBe('/login')
+    expect(api.status).toBe(401)
+    expect(api.json).toMatchObject({ ok: false })
+  })
+
+  it('rejects foreign origins for mail and pending TOTP forms', async () => {
+    const h = await start()
+    const mail = await call(h.port, '/auth/mail', { method: 'POST', origin: 'https://attacker.invalid', body: 'mail=a%40example.invalid', headers: { 'content-type': 'application/x-www-form-urlencoded' } })
+    expect(mail.status).toBe(403)
+    const tfa = await call(h.port, '/auth/tfa', { method: 'POST', origin: 'https://attacker.invalid', body: 'code=123456', headers: { 'content-type': 'application/x-www-form-urlencoded', cookie: 'outbox_pending=abc' } })
+    expect(tfa.status).toBe(403)
+  })
+
+  it('rejects malformed codes and shows the form again on an incorrect code', async () => {
+    let calls = 0
+    const h = await start({ fetch: async () => { calls += 1; return new Response(null, { status: 400 }) } })
+    const callback = await call(h.port, `/auth/callback?session=${encodeURIComponent(mailToken())}`)
+    const cookie = callback.headers.get('set-cookie')!.split(';')[0]!
+    const submitCode = (code: string) => call(h.port, '/auth/tfa', { method: 'POST', headers: { cookie, 'content-type': 'application/x-www-form-urlencoded' }, body: `code=${code}` })
+    expect((await submitCode('123')).status).toBe(400)
+    expect(calls).toBe(0)
+    const wrong = await submitCode('123456')
+    expect(wrong.text).toContain('Invalid code')
+    expect(wrong.text).toContain('name="code"')
+  })
+
+  it('uses an existing strict TOTP proof without setup or verification', async () => {
+    const token = mailToken()
+    let calls = 0
+    const h = await start({ fetch: async () => { calls += 1; return new Response(null, { status: 200 }) }, introspect: async () => ({ ok: true, user: 1, account: 1, role: 'OUTBOX' }) })
+    const callback = await call(h.port, `/auth/callback?session=${encodeURIComponent(token)}`)
+    const cookie = callback.headers.get('set-cookie')!.split(';')[0]!
+    const result = await call(h.port, '/auth/tfa', { headers: { cookie } })
+    expect(result.location).toBe('/')
+    expect(calls).toBe(1)
+  })
+  it('creates a pending cookie, verifies TOTP with the same token, and consumes it', async () => {
+    const token = mailToken()
+    const calls: Array<{ url: string; init?: RequestInit }> = []
+    const backend: typeof fetch = async (input, init) => {
+      const url = String(input)
+      calls.push({ url, init })
+      // Shapes: the DFX API, /v1/auth/mail and /v1/auth/2fa contracts
+      if (url.endsWith('/v1/auth/mail')) return new Response(null, { status: 201 })
+      if (url.endsWith('/v1/auth/introspect/outbox')) return Response.json({ user: 1, account: 1, role: 'Outbox' })
+      if (url.includes('/2fa/verify')) return new Response(null, { status: 201 })
+      if (init?.method === 'POST') return Response.json({ type: 'App', secret: 'SETUPSECRET', uri: 'otpauth://totp/example' }, { status: 201 })
+      // Captured from a locally running DFX API (ENVIRONMENT=loc) on 2026-11-09
+      return Response.json({ code: 'TFA_REQUIRED', message: '2FA required (strict)', level: 'strict' }, { status: 403 })
+    }
+    const h = await start({ fetch: backend, introspect: createHttpIntrospect({ baseUrl: 'https://identity.invalid', jwtSecret: 'test-jwt-secret', fetch: backend }) })
+    const login = await call(h.port, '/login')
+    expect(login.text).toContain('Sign in with email')
+    expect(login.text).toContain('Sign in with wallet')
+    const mail = await call(h.port, '/auth/mail', { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: 'mail=test%40example.invalid' })
+    expect(mail.text).toContain('Open the link in the email to continue.')
+    expect(JSON.parse(String(calls[0]!.init?.body))).toEqual({ mail: 'test@example.invalid', redirectUri: 'https://outbox.invalid/auth/callback' })
+    const callback = await call(h.port, `/auth/callback?session=${encodeURIComponent(token)}`)
+    expect(callback.location).toBe('/auth/tfa')
+    expect(callback.text).not.toContain(token)
+    const cookie = callback.headers.get('set-cookie')!.split(';')[0]!
+    const page = await call(h.port, '/auth/tfa', { headers: { cookie } })
+    expect(page.text).toContain('SETUPSECRET')
+    expect(page.text).not.toContain(token)
+    const verified = await call(h.port, '/auth/tfa', { method: 'POST', headers: { cookie, 'content-type': 'application/x-www-form-urlencoded' }, body: 'code=123456' })
+    expect(verified.location).toBe('/')
+    const verifyCall = calls.find((item) => item.url.includes('/2fa/verify'))!
+    expect(verifyCall.init?.headers).toMatchObject({ authorization: `Bearer ${token}` })
+    expect(JSON.parse(String(verifyCall.init?.body))).toEqual({ token: '123456' })
+    expect((await call(h.port, '/auth/tfa', { headers: { cookie } })).location).toBe('/login')
+    expect(h.logs.join('\n')).not.toContain(token)
+    expect(h.logs.join('\n')).not.toContain('123456')
+  })
+
+  it('expires the pending session and never grants access after ten minutes', async () => {
+    const h = await start()
+    const callback = await call(h.port, `/auth/callback?session=${encodeURIComponent(mailToken())}`)
+    const cookie = callback.headers.get('set-cookie')!.split(';')[0]!
+    h.clock.now += 600_000
+    const page = await call(h.port, '/auth/tfa', { headers: { cookie } })
+    expect(page.location).toBe('/login')
+    expect(h.db.prepare('SELECT * FROM auth_pending').all()).toHaveLength(0)
+  })
+
+  it('shows the KYC error without a code field after verification', async () => {
+    const h = await start({ fetch: async () => new Response(null, { status: 201 }), introspect: async () => ({ ok: false, status: 403, reason: 'staff-kyc-required' }) })
+    const callback = await call(h.port, `/auth/callback?session=${encodeURIComponent(mailToken())}`)
+    const cookie = callback.headers.get('set-cookie')!.split(';')[0]!
+    const result = await call(h.port, '/auth/tfa', { method: 'POST', headers: { cookie, 'content-type': 'application/x-www-form-urlencoded' }, body: 'code=123456' })
+    expect(result.text).toContain('This account has no verified name.')
+    expect(result.text).not.toContain('name="code"')
+  })
+})
+
+describe('wallet and API login', () => {
+  it('proxies the challenge and 201 sign-in before issuing a cookie', async () => {
+    const h = await start({ fetch: async (input, init) => {
+      const url = String(input)
+      // Shape: the DFX API, GET /v1/auth/signMessage and POST /v1/auth/signIn
+      if (url.includes('/signMessage')) return Response.json({ message: 'Sign this message' })
+      expect(JSON.parse(String(init?.body))).toEqual({ address: '0x123', signature: 'signed' })
+      return Response.json({ accessToken: TOKEN_ADMIN }, { status: 201 })
+    } })
+    const challenge = await call(h.port, '/auth/wallet/message?address=0x123')
+    expect(challenge.json).toEqual({ message: 'Sign this message' })
+    const signed = await call(h.port, '/auth/wallet', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ address: '0x123', signature: 'signed' }) })
+    expect(signed.json).toEqual({ ok: true })
+    expect(signed.headers.get('set-cookie')).toContain('outbox=')
+    const logout = await call(h.port, '/auth/logout', { method: 'POST', headers: { cookie: `outbox=${TOKEN_ADMIN}` } })
+    expect(logout.location).toBe('/login')
+    expect(logout.headers.get('set-cookie')).toContain('Max-Age=0')
+  })
+
+  it('falls back to Outbox introspection for the API token callback', async () => {
+    const roles: string[] = []
+    const h = await start({ introspect: async (_token, role) => {
+      roles.push(role)
+      return role === 'ADMIN' ? { ok: false, status: 403 } : { ok: true, user: 1, account: 1, role: 'OUTBOX' }
+    } })
+    const result = await call(h.port, '/auth/callback', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ accessToken: TOKEN_A }) })
+    expect(result.json).toEqual({ ok: true })
+    expect(roles).toEqual(['ADMIN', 'OUTBOX'])
+  })
+})
+
+describe('weighted post length', () => {
+  it('reports the weighted length and blocks over the configured limit', async () => {
+    const h = await start({ xMaxWeightedLength: 3 })
+    const reviewed = await call(h.port, '/api/review', { method: 'POST', token: TOKEN_A, headers: { 'content-type': 'application/json' }, body: JSON.stringify({ text: '漢😀' }) })
+    expect(reviewed.json).toMatchObject({ charCount: 4, blocking: ['Text is longer than X allows for this account (4 of 3 characters).'] })
+    expect((await submitJson(h.port, TOKEN_A, { text: '漢😀', scheduledAt: FUTURE_LOCAL })).status).toBe(409)
+  })
+})
 
 function entryCount(db: SqliteDatabase): number {
   return (db.prepare('SELECT COUNT(*) AS n FROM entries').get() as { n: number }).n
@@ -490,7 +687,7 @@ describe('GET /review/:id', () => {
       text: CLEAN,
       scheduledAt: SUMMER_EPOCH,
       checks: null,
-      actor: { user: 'user-a', account: 'account-a' },
+      actor: { user: 1, account: 1 },
       now: NOW
     })
     if (!created.ok) throw new Error('expected submit to succeed')
@@ -756,6 +953,19 @@ describe('visibility', () => {
 })
 
 describe('cross-site POST', () => {
+  it('uses same-origin referrer policy and accepts same-origin cookie POSTs while rejecting Origin null', async () => {
+    const h = await start()
+    const page = await call(h.port, '/', { headers: { cookie: `outbox=${TOKEN_A}` } })
+    expect(page.headers.get('referrer-policy')).toBe('same-origin')
+    const options = {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', cookie: `outbox=${TOKEN_A}`, referer: `http://127.0.0.1:${h.port}/` },
+      body: JSON.stringify({ text: CLEAN, scheduledAt: FUTURE_LOCAL })
+    }
+    expect((await call(h.port, '/api/submit', { ...options, origin: `http://127.0.0.1:${h.port}` })).status).toBe(200)
+    expect((await call(h.port, '/api/submit', { ...options, origin: 'null' })).status).toBe(403)
+    expect(entryCount(h.db)).toBe(1)
+  })
   it('rejects a mutating POST with a Cookie and a foreign Origin and writes the attempt to audit', async () => {
     const h = await start()
     const res = await call(h.port, '/api/submit', {
@@ -847,8 +1057,9 @@ describe('log denylist', () => {
     })
     expect(res.status).toBe(200)
     const joined = h.logs.join('\n')
-    expect(joined).toContain('Authorization:')
-    expect(joined).toContain('Cookie:')
+    expect(joined).toContain('POST /api/submit')
+    expect(joined).not.toContain('Authorization:')
+    expect(joined).not.toContain('Cookie:')
     expect(joined).not.toContain(SEKRIT_BEARER)
     expect(joined).not.toContain(SEKRIT_COOKIE)
     expect(joined).not.toMatch(/Bearer\s+(?!(\*\*\*))/i)
@@ -868,7 +1079,7 @@ describe('log denylist', () => {
     })
     expect(res.status).toBe(200)
     const joined = h.logs.join('\n')
-    expect(joined).toContain('Cookie:')
+    expect(joined).not.toContain('Cookie:')
     expect(joined).not.toContain(SEKRIT_COOKIE)
     expect(joined).not.toContain('outbox=')
   })
@@ -1384,8 +1595,8 @@ describe('GET /api/me', () => {
     const res = await call(h.port, '/api/me', { token: TOKEN_A })
     expect(res.status).toBe(200)
     expect(res.json).toEqual({
-      account: 'account-a',
-      user: 'user-a',
+      account: 1,
+      user: 1,
       role: 'OUTBOX'
     })
   })
@@ -1394,8 +1605,8 @@ describe('GET /api/me', () => {
 describe('GET /posts', () => {
   it('shows only the author’s posts to OUTBOX and every post to ADMIN', async () => {
     const h = await start()
-    const own = submitSubmission(h.db, { text: 'own author post', scheduledAt: SUMMER_EPOCH, checks: { blocking: [] }, actor: { user: 'user-a', account: 'account-a' }, now: NOW })
-    const other = submitSubmission(h.db, { text: 'other author post', scheduledAt: SUMMER_EPOCH + 300_000, checks: { blocking: [] }, actor: { user: 'user-b', account: 'account-b' }, now: NOW })
+    const own = submitSubmission(h.db, { text: 'own author post', scheduledAt: SUMMER_EPOCH, checks: { blocking: [] }, actor: { user: 1, account: 1 }, now: NOW })
+    const other = submitSubmission(h.db, { text: 'other author post', scheduledAt: SUMMER_EPOCH + 300_000, checks: { blocking: [] }, actor: { user: 2, account: 2 }, now: NOW })
     expect(own.ok && other.ok).toBe(true)
     const author = await call(h.port, '/posts', { token: TOKEN_A })
     expect(author.status).toBe(200)
@@ -1428,7 +1639,7 @@ describe('GET /media/:sha256', () => {
   it('serves image bytes only to an identity that can see a referencing entry', async () => {
     const h = await start()
     const bytes = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, 1])
-    const created = submitSubmission(h.db, { text: CLEAN, scheduledAt: SUMMER_EPOCH, imageBytes: bytes, checks: { blocking: [] }, actor: { user: 'user-a', account: 'account-a' }, now: NOW })
+    const created = submitSubmission(h.db, { text: CLEAN, scheduledAt: SUMMER_EPOCH, imageBytes: bytes, checks: { blocking: [] }, actor: { user: 1, account: 1 }, now: NOW })
     if (!created.ok) throw new Error('expected submission')
     const sha = imageSha256(bytes)
     const author = await fetch(`http://127.0.0.1:${h.port}/media/${sha}`, { headers: { authorization: `Bearer ${TOKEN_A}` } })
@@ -1472,7 +1683,7 @@ describe('POST /api/review', () => {
       body: JSON.stringify({ text: longText })
     })
     expect(res.status).toBe(200)
-    expect(res.json).toMatchObject({ ok: true, blocking: [], charCount: [...longText].length })
+    expect(res.json).toMatchObject({ ok: true, blocking: [], charCount: [...longText].length + 1 })
     expect(res.json).not.toHaveProperty('hints')
     expect(res.text).not.toContain('More than 0 emoji.')
     expect(res.text).not.toContain('A sentence is longer than 35 words.')
@@ -1487,12 +1698,12 @@ describe('POST /api/review', () => {
 })
 
 describe('unreadable cookie', () => {
-  it('returns 401 rather than 500 when the session cookie cannot be decoded', async () => {
+  it('redirects to login when the session cookie cannot be decoded', async () => {
     const h = await start()
     const res = await call(h.port, '/', {
       headers: { cookie: 'outbox=%' }
     })
-    expect(res.status).toBe(401)
+    expect(res.status).toBe(302)
     expect(res.text).not.toContain('Internal error.')
   })
 })
