@@ -221,8 +221,10 @@ describe('mail login', () => {
     expect(h.db.prepare('SELECT * FROM auth_pending').all()).toHaveLength(0)
   })
   it('does not disclose a backend mail failure', async () => {
-    // Captured from a locally running DFX API (ENVIRONMENT=loc) on 2026-11-09
-    const h = await start({ fetch: async () => Response.json({ statusCode: 403, message: 'Forbidden resource', error: 'Forbidden' }, { status: 403 }) })
+    const h = await start({ fetch: async () => {
+      // Captured from a locally running DFX API (ENVIRONMENT=loc) on 2026-11-09
+      return Response.json({ statusCode: 403, message: 'Forbidden resource', error: 'Forbidden' }, { status: 403 })
+    } })
     const result = await call(h.port, '/auth/mail', { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: 'mail=a%40example.invalid' })
     expect(result.status).toBe(502)
     expect(result.text).not.toContain('Forbidden resource')
@@ -246,8 +248,12 @@ describe('mail login', () => {
 
   it('shows only the code field when setup says it already exists', async () => {
     const h = await start({ fetch: async (_input, init) => {
+      if (init?.method === 'POST') {
+        // Captured from a locally running DFX API (ENVIRONMENT=loc) on 2026-11-09
+        return Response.json({ statusCode: 409, message: '2FA already set up', error: 'Conflict' }, { status: 409 })
+      }
       // Captured from a locally running DFX API (ENVIRONMENT=loc) on 2026-11-09
-      return init?.method === 'POST' ? Response.json({ statusCode: 409, message: '2FA already set up', error: 'Conflict' }, { status: 409 }) : Response.json({ code: 'TFA_REQUIRED', message: '2FA required (strict)', level: 'strict' }, { status: 403 })
+      return Response.json({ code: 'TFA_REQUIRED', message: '2FA required (strict)', level: 'strict' }, { status: 403 })
     } })
     const callback = await call(h.port, `/auth/callback?session=${encodeURIComponent(mailToken())}`)
     const cookie = callback.headers.get('set-cookie')!.split(';')[0]!
@@ -276,7 +282,11 @@ describe('mail login', () => {
 
   it('rejects malformed codes and shows the form again on an incorrect code', async () => {
     let calls = 0
-    const h = await start({ fetch: async () => { calls += 1; return new Response(null, { status: 400 }) } })
+    const h = await start({ fetch: async () => {
+      calls += 1
+      // Shape: the DFX API, POST /v1/auth/2fa/verify contract
+      return new Response(null, { status: 400 })
+    } })
     const callback = await call(h.port, `/auth/callback?session=${encodeURIComponent(mailToken())}`)
     const cookie = callback.headers.get('set-cookie')!.split(';')[0]!
     const submitCode = (code: string) => call(h.port, '/auth/tfa', { method: 'POST', headers: { cookie, 'content-type': 'application/x-www-form-urlencoded' }, body: `code=${code}` })
@@ -290,7 +300,11 @@ describe('mail login', () => {
   it('uses an existing strict TOTP proof without setup or verification', async () => {
     const token = mailToken()
     let calls = 0
-    const h = await start({ fetch: async () => { calls += 1; return new Response(null, { status: 200 }) }, introspect: async () => ({ ok: true, user: 1, account: 1, role: 'OUTBOX' }) })
+    const h = await start({ fetch: async () => {
+      calls += 1
+      // Shape: the DFX API, GET /v1/auth/2fa contract
+      return new Response(null, { status: 200 })
+    }, introspect: async () => ({ ok: true, user: 1, account: 1, role: 'OUTBOX' }) })
     const callback = await call(h.port, `/auth/callback?session=${encodeURIComponent(token)}`)
     const cookie = callback.headers.get('set-cookie')!.split(';')[0]!
     const result = await call(h.port, '/auth/tfa', { headers: { cookie } })
@@ -303,11 +317,16 @@ describe('mail login', () => {
     const backend: typeof fetch = async (input, init) => {
       const url = String(input)
       calls.push({ url, init })
-      // Shapes: the DFX API, /v1/auth/mail and /v1/auth/2fa contracts
+      // Shape: the DFX API, POST /v1/auth/mail contract
       if (url.endsWith('/v1/auth/mail')) return new Response(null, { status: 201 })
+      // Shape: the DFX API, GET /v1/auth/introspect/outbox contract
       if (url.endsWith('/v1/auth/introspect/outbox')) return Response.json({ user: 1, account: 1, role: 'Outbox' })
+      // Shape: the DFX API, POST /v1/auth/2fa/verify contract
       if (url.includes('/2fa/verify')) return new Response(null, { status: 201 })
-      if (init?.method === 'POST') return Response.json({ type: 'App', secret: 'SETUPSECRET', uri: 'otpauth://totp/example' }, { status: 201 })
+      if (init?.method === 'POST') {
+        // Shape: the DFX API, POST /v1/auth/2fa contract
+        return Response.json({ type: 'App', secret: 'SETUPSECRET', uri: 'otpauth://totp/example' }, { status: 201 })
+      }
       // Captured from a locally running DFX API (ENVIRONMENT=loc) on 2026-11-09
       return Response.json({ code: 'TFA_REQUIRED', message: '2FA required (strict)', level: 'strict' }, { status: 403 })
     }
@@ -346,7 +365,10 @@ describe('mail login', () => {
   })
 
   it('shows the KYC error without a code field after verification', async () => {
-    const h = await start({ fetch: async () => new Response(null, { status: 201 }), introspect: async () => ({ ok: false, status: 403, reason: 'staff-kyc-required' }) })
+    const h = await start({ fetch: async () => {
+      // Shape: the DFX API, POST /v1/auth/2fa/verify contract
+      return new Response(null, { status: 201 })
+    }, introspect: async () => ({ ok: false, status: 403, reason: 'staff-kyc-required' }) })
     const callback = await call(h.port, `/auth/callback?session=${encodeURIComponent(mailToken())}`)
     const cookie = callback.headers.get('set-cookie')!.split(';')[0]!
     const result = await call(h.port, '/auth/tfa', { method: 'POST', headers: { cookie, 'content-type': 'application/x-www-form-urlencoded' }, body: 'code=123456' })
@@ -359,9 +381,12 @@ describe('wallet and API login', () => {
   it('proxies the challenge and 201 sign-in before issuing a cookie', async () => {
     const h = await start({ fetch: async (input, init) => {
       const url = String(input)
-      // Shape: the DFX API, GET /v1/auth/signMessage and POST /v1/auth/signIn
-      if (url.includes('/signMessage')) return Response.json({ message: 'Sign this message' })
+      if (url.includes('/signMessage')) {
+        // Shape: the DFX API, GET /v1/auth/signMessage contract
+        return Response.json({ message: 'Sign this message' })
+      }
       expect(JSON.parse(String(init?.body))).toEqual({ address: '0x123', signature: 'signed' })
+      // Shape: the DFX API, POST /v1/auth/signIn contract
       return Response.json({ accessToken: TOKEN_ADMIN }, { status: 201 })
     } })
     const challenge = await call(h.port, '/auth/wallet/message?address=0x123')

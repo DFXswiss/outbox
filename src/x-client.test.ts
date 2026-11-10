@@ -110,6 +110,7 @@ describe('X publisher client', () => {
   })
 
   it('publishes a 201 response as an X permalink', async () => {
+    // Shape: https://docs.x.com/x-api/posts/create-post
     const x = client(async () => json({ data: { id: '123', text: 'hello' } }, 201))
     await expect(x.postTweet('hello', NOW + 20_000)).resolves.toEqual({
       result: {
@@ -150,13 +151,16 @@ describe('X publisher client', () => {
     let tweets = 0
     const x = client(async (input) => {
       const url = String(input)
-      if (url.endsWith('/2/media/upload')) return json({ title: 'Unavailable' }, 500)
+      if (url.endsWith('/2/media/upload')) {
+        // Shape: https://docs.x.com/x-api/fundamentals/response-codes-and-errors
+        return json({ title: 'Unavailable', detail: 'Service unavailable.', type: 'about:blank', status: 500 }, 500)
+      }
       tweets += 1
       // Shape: https://docs.x.com/x-api/posts/create-post
       return json({ data: { id: '123', text: 'hello' } }, 201)
     })
     const result = await x.postTweet('hello', NOW + 20_000, Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))
-    expect(result.result).toMatchObject({ ok: false, error: 'HTTP 500: Unavailable' })
+    expect(result.result).toMatchObject({ ok: false, error: 'HTTP 500: Unavailable: Service unavailable.' })
     expect(result.result.uncertain).toBeUndefined()
     expect(tweets).toBe(0)
   })
@@ -169,11 +173,23 @@ describe('X publisher client', () => {
       const url = String(input)
       if (url.endsWith('/2/oauth2/token')) {
         refreshes += 1
-        return json({ access_token: 'new-access-token', refresh_token: 'new-refresh-token', expires_in: 7200 })
+        // Shape: https://docs.x.com/fundamentals/authentication/oauth-2-0/authorization-code
+        return json({
+          token_type: 'bearer',
+          expires_in: 7200,
+          access_token: 'new-access-token',
+          scope: 'tweet.read tweet.write users.read',
+          refresh_token: 'new-refresh-token'
+        })
       }
       if (url.endsWith('/2/media/upload')) {
         uploads += 1
-        return uploads === 1 ? json({ title: 'expired' }, 401) : json({ data: { id: '1880028106020515840' } })
+        if (uploads === 1) {
+          // Shape: https://docs.x.com/x-api/fundamentals/response-codes-and-errors
+          return json({ title: 'expired', detail: 'The access token expired.', type: 'about:blank', status: 401 }, 401)
+        }
+        // Shape: https://docs.x.com/x-api/media/upload-media
+        return json({ data: { id: '1880028106020515840' } })
       }
       tweets += 1
       // Shape: https://docs.x.com/x-api/posts/create-post
@@ -194,19 +210,32 @@ describe('X publisher client', () => {
       const url = String(input)
       if (url.endsWith('/2/oauth2/token')) {
         refreshes += 1
-        return json({ access_token: 'new-access-token', refresh_token: 'new-refresh-token', expires_in: 7200 })
+        // Shape: https://docs.x.com/fundamentals/authentication/oauth-2-0/authorization-code
+        return json({
+          token_type: 'bearer',
+          expires_in: 7200,
+          access_token: 'new-access-token',
+          scope: 'tweet.read tweet.write users.read',
+          refresh_token: 'new-refresh-token'
+        })
       }
       if (url.endsWith('/2/media/upload')) {
         uploads += 1
-        return uploads === 1 ? json({ title: 'expired' }, 401) : json({ data: { id: '1880028106020515840' } })
+        if (uploads === 1) {
+          // Shape: https://docs.x.com/x-api/fundamentals/response-codes-and-errors
+          return json({ title: 'expired', detail: 'The access token expired.', type: 'about:blank', status: 401 }, 401)
+        }
+        // Shape: https://docs.x.com/x-api/media/upload-media
+        return json({ data: { id: '1880028106020515840' } })
       }
       tweets += 1
-      return json({ title: 'expired again' }, 401)
+      // Shape: https://docs.x.com/x-api/fundamentals/response-codes-and-errors
+      return json({ title: 'expired again', detail: 'The access token expired.', type: 'about:blank', status: 401 }, 401)
     })
     const result = await x.postTweet('hello', NOW + 20_000, Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))
     expect(refreshes).toBe(1)
     expect(tweets).toBe(1)
-    expect(result.result).toMatchObject({ ok: false, error: 'HTTP 401: expired again' })
+    expect(result.result).toMatchObject({ ok: false, error: 'HTTP 401: expired again: The access token expired.' })
     expect(result.result.uncertain).toBeUndefined()
     expect(result.needsLogin).toBe(true)
   })
@@ -215,6 +244,7 @@ describe('X publisher client', () => {
     let tweets = 0
     const x = client(async (input) => {
       const url = String(input)
+      // Shape: https://docs.x.com/x-api/media/upload-media
       if (url.endsWith('/2/media/upload')) return json({ data: { id: '1880028106020515840', processing_info: { state: 'failed' } } })
       tweets += 1
       // Shape: https://docs.x.com/x-api/posts/create-post
@@ -227,9 +257,12 @@ describe('X publisher client', () => {
   })
 
   it.each([400, 403, 429])('classifies HTTP %s as failed', async (status) => {
+    // Shape: https://docs.x.com/x-api/fundamentals/response-codes-and-errors
     const x = client(async () => json({
       title: 'Rejected',
-      detail: 'invalid post'
+      detail: 'invalid post',
+      type: 'about:blank',
+      status
     }, status))
     const response = await x.postTweet('hello', NOW + 20_000)
     expect(response.result).toMatchObject({
@@ -242,9 +275,11 @@ describe('X publisher client', () => {
   })
 
   it.each([
-    { label: 'HTTP 500', status: 500, body: { title: 'Unavailable' } },
-    { label: 'HTTP 503', status: 503, body: { title: 'Unavailable' } },
-    { label: 'HTTP 307', status: 307, body: { title: 'Temporary redirect' } },
+    // Shape: https://docs.x.com/x-api/fundamentals/response-codes-and-errors
+    { label: 'HTTP 500', status: 500, body: { title: 'Unavailable', detail: 'Service unavailable.', type: 'about:blank', status: 500 } },
+    { label: 'HTTP 503', status: 503, body: { title: 'Unavailable', detail: 'Service unavailable.', type: 'about:blank', status: 503 } },
+    { label: 'HTTP 307', status: 307, body: { title: 'Temporary redirect', detail: 'The response redirected.', type: 'about:blank', status: 307 } },
+    // Shape: https://docs.x.com/x-api/posts/create-post
     { label: '2xx without an id', status: 201, body: { data: { text: 'accepted?' } } },
     { label: 'HTTP 202 without an id', status: 202, body: { data: { text: 'accepted?' } } },
     { label: 'HTTP 204 without an id', status: 204 },
@@ -265,14 +300,18 @@ describe('X publisher client', () => {
       const url = String(input)
       if (url.endsWith('/2/oauth2/token')) {
         tokenRequests += 1
+        // Shape: https://docs.x.com/fundamentals/authentication/oauth-2-0/authorization-code
         return json({
+          token_type: 'bearer',
+          expires_in: 7200,
           access_token: 'refreshed-access-token',
-          refresh_token: 'rotated-refresh-token',
-          expires_in: 7200
+          scope: 'tweet.read tweet.write users.read',
+          refresh_token: 'rotated-refresh-token'
         })
       }
       if (!url.endsWith('/2/tweets')) {
-        return json({}, 404)
+        // Shape: https://docs.x.com/x-api/fundamentals/response-codes-and-errors
+        return json({ title: 'Not Found', detail: 'The endpoint does not exist.', type: 'about:blank', status: 404 }, 404)
       }
 
       tweetRequests += 1
@@ -285,6 +324,7 @@ describe('X publisher client', () => {
         throw new Error(scenario.error)
       }
       if (scenario.status === 204) {
+        // Shape: https://docs.x.com/x-api/posts/create-post
         return new Response(null, { status: 204 })
       }
       return json(scenario.body, scenario.status)
@@ -338,9 +378,12 @@ describe('X publisher client', () => {
       error: 'Request deadline exceeded'
     })
 
+    // Shape: https://docs.x.com/x-api/fundamentals/response-codes-and-errors
     const x = client(async () => json({
       title: 'test-access-token',
-      detail: 'test-refresh-token was rejected'
+      detail: 'test-refresh-token was rejected',
+      type: 'about:blank',
+      status: 403
     }, 403))
     const result = await x.postTweet('hello', NOW + 20_000)
     expect(result.result.error).toContain('HTTP 403')
@@ -387,10 +430,13 @@ describe('X publisher client', () => {
       const url = String(input)
       if (url.endsWith('/2/oauth2/token')) {
         tokenRequests += 1
+        // Shape: https://docs.x.com/fundamentals/authentication/oauth-2-0/authorization-code
         return json({
+          token_type: 'bearer',
+          expires_in: 7200,
           access_token: 'refreshed-access-token',
-          refresh_token: 'rotated-refresh-token',
-          expires_in: 7200
+          scope: 'tweet.read tweet.write users.read',
+          refresh_token: 'rotated-refresh-token'
         })
       }
       tweetAuthorization = new Headers(init?.headers).get('authorization')
@@ -408,10 +454,13 @@ describe('X publisher client', () => {
 
   it('stores the access-token expiry from expires_in', async () => {
     db.prepare('UPDATE x_credentials SET accessTokenExpiresAt = NULL WHERE id = 1').run()
+    // Shape: https://docs.x.com/fundamentals/authentication/oauth-2-0/authorization-code
     const x = client(async () => json({
+      token_type: 'bearer',
+      expires_in: 120,
       access_token: 'refreshed-access-token',
-      refresh_token: 'rotated-refresh-token',
-      expires_in: 120
+      scope: 'tweet.read tweet.write users.read',
+      refresh_token: 'rotated-refresh-token'
     }))
 
     await x.ensureAccessToken(NOW + 20_000)
@@ -431,15 +480,19 @@ describe('X publisher client', () => {
         expect(authorization).toMatch(/^Basic /)
         const payload = Buffer.from(authorization!.slice(6), 'base64').toString('utf8')
         expect(payload).toBe('test-client:test-client-secret')
+        // Shape: https://docs.x.com/fundamentals/authentication/oauth-2-0/authorization-code
         return json({
+          token_type: 'bearer',
+          expires_in: 7200,
           access_token: 'refreshed-access-token',
-          refresh_token: 'rotated-refresh-token',
-          expires_in: 7200
+          scope: 'tweet.read tweet.write users.read',
+          refresh_token: 'rotated-refresh-token'
         })
       }
       tweets += 1
       if (tweets === 1) {
-        return json({ title: 'expired' }, 401)
+        // Shape: https://docs.x.com/x-api/fundamentals/response-codes-and-errors
+        return json({ title: 'expired', detail: 'The access token expired.', type: 'about:blank', status: 401 }, 401)
       }
       expect(loadCredentials(db)?.refreshToken).toBe('rotated-refresh-token')
       // Shape: https://docs.x.com/x-api/posts/create-post
@@ -470,10 +523,12 @@ describe('X publisher client', () => {
     const x = client(async (input) => {
       if (String(input).endsWith('/2/oauth2/token')) {
         tokens += 1
-        return json({ title: 'invalid refresh' }, 400)
+        // Shape: https://docs.x.com/fundamentals/authentication/oauth-2-0/authorization-code
+        return json({ error: 'invalid_grant', error_description: 'The refresh token is invalid.' }, 400)
       }
       tweets += 1
-      return json({ title: 'expired' }, 401)
+      // Shape: https://docs.x.com/x-api/fundamentals/response-codes-and-errors
+      return json({ title: 'expired', detail: 'The access token expired.', type: 'about:blank', status: 401 }, 401)
     })
     expect(await x.postTweet('hello', NOW + 20_000)).toMatchObject({
       result: { ok: false, uncertain: true },
@@ -490,20 +545,30 @@ describe('X publisher client', () => {
       const url = String(input)
       if (url.endsWith('/2/oauth2/token')) {
         refreshes += 1
-        return json({ access_token: 'refreshed-access-token', expires_in: 7200 })
+        // Shape: https://docs.x.com/fundamentals/authentication/oauth-2-0/authorization-code
+        return json({
+          token_type: 'bearer',
+          expires_in: 7200,
+          access_token: 'refreshed-access-token',
+          scope: 'tweet.read tweet.write users.read'
+        })
       }
       if (url.endsWith('/2/media/upload')) {
+        // Shape: https://docs.x.com/x-api/media/upload-media
         return json({ data: { id: '1880028106020515840', processing_info: { state: 'pending', check_after_secs: 0 } } })
       }
       if (url.includes('/2/media/upload?command=STATUS')) {
         statusChecks += 1
-        return statusChecks === 1
-          ? json({ title: 'expired' }, 401)
-          // Shape: https://docs.x.com/x-api/media/get-media-upload-status
-          : json({ data: { id: '1880028106020515840', processing_info: { state: 'succeeded' } } })
+        if (statusChecks === 1) {
+          // Shape: https://docs.x.com/x-api/fundamentals/response-codes-and-errors
+          return json({ title: 'expired', detail: 'The access token expired.', type: 'about:blank', status: 401 }, 401)
+        }
+        // Shape: https://docs.x.com/x-api/media/get-media-upload-status
+        return json({ data: { id: '1880028106020515840', processing_info: { state: 'succeeded' } } })
       }
       tweets += 1
-      return json({ title: 'unauthorized' }, 401)
+      // Shape: https://docs.x.com/x-api/fundamentals/response-codes-and-errors
+      return json({ title: 'unauthorized', detail: 'Not allowed.', type: 'about:blank', status: 401 }, 401)
     })
 
     const response = await x.postTweet(
@@ -512,7 +577,7 @@ describe('X publisher client', () => {
       Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])
     )
 
-    expect(response.result).toMatchObject({ ok: false, error: 'HTTP 401: unauthorized' })
+    expect(response.result).toMatchObject({ ok: false, error: 'HTTP 401: unauthorized: Not allowed.' })
     expect(response.result.uncertain).toBeUndefined()
     expect(response.needsLogin).toBe(true)
     expect({ refreshes, statusChecks, tweets }).toEqual({ refreshes: 1, statusChecks: 2, tweets: 1 })
@@ -522,9 +587,10 @@ describe('X publisher client', () => {
     db.prepare('UPDATE x_credentials SET accessTokenExpiresAt = NULL WHERE id = 1').run()
     const clientSecret = 'test-client-secret'
     const basicValue = Buffer.from(`test-client:${clientSecret}`).toString('base64')
+    // Shape: https://docs.x.com/fundamentals/authentication/oauth-2-0/authorization-code
     const x = client(async () => json({
-      title: `Rejected ${clientSecret}`,
-      detail: `Credential ${basicValue} was rejected`
+      error: 'invalid_grant',
+      error_description: `Rejected ${clientSecret}; credential ${basicValue} was rejected`
     }, 400), { secret: clientSecret })
 
     const response = await x.postTweet('hello', NOW + 20_000)
@@ -542,9 +608,12 @@ describe('X publisher client', () => {
     db.prepare(
       'UPDATE x_credentials SET accessToken = ?, refreshToken = ? WHERE id = 1'
     ).run(accessToken, refreshToken)
+    // Shape: https://docs.x.com/x-api/fundamentals/response-codes-and-errors
     const x = client(async () => json({
       title: `Rejected ${refreshToken}`,
-      detail: `Access ${accessToken}; refresh ${refreshToken}; secret ${clientSecret}; basic ${basicValue}`
+      detail: `Access ${accessToken}; refresh ${refreshToken}; secret ${clientSecret}; basic ${basicValue}`,
+      type: 'about:blank',
+      status: 403
     }, 403), { secret: clientSecret })
 
     const response = await x.postTweet('hello', NOW + 20_000)
@@ -564,10 +633,17 @@ describe('X publisher client', () => {
     const x = client(async (input) => {
       if (String(input).endsWith('/2/oauth2/token')) {
         tokens += 1
-        return json({ access_token: 'test-access-token', expires_in: 7200 })
+        // Shape: https://docs.x.com/fundamentals/authentication/oauth-2-0/authorization-code
+        return json({
+          token_type: 'bearer',
+          expires_in: 7200,
+          access_token: 'test-access-token',
+          scope: 'tweet.read tweet.write users.read'
+        })
       }
       tweets += 1
-      return json({ title: 'unauthorized' }, 401)
+      // Shape: https://docs.x.com/x-api/fundamentals/response-codes-and-errors
+      return json({ title: 'unauthorized', detail: 'Not allowed.', type: 'about:blank', status: 401 }, 401)
     })
     const response = await x.postTweet('hello', NOW + 20_000)
     expect(response.result.ok).toBe(false)
@@ -584,7 +660,8 @@ describe('X publisher client', () => {
       if (String(input).endsWith('/2/tweets')) {
         tweets += 1
       }
-      return json({ title: 'refresh rejected' }, 400)
+      // Shape: https://docs.x.com/fundamentals/authentication/oauth-2-0/authorization-code
+      return json({ error: 'invalid_grant', error_description: 'The refresh token was rejected.' }, 400)
     })
     const response = await failed.postTweet('hello', NOW + 20_000)
     expect(response.result.ok).toBe(false)
@@ -602,7 +679,13 @@ describe('X publisher client', () => {
     const shared = client(async () => {
       tokenRequests += 1
       await gate
-      return json({ access_token: 'shared-access-token', expires_in: 7200 })
+      // Shape: https://docs.x.com/fundamentals/authentication/oauth-2-0/authorization-code
+      return json({
+        token_type: 'bearer',
+        expires_in: 7200,
+        access_token: 'shared-access-token',
+        scope: 'tweet.read tweet.write users.read'
+      })
     })
     const first = shared.ensureAccessToken(NOW + 20_000)
     const second = shared.ensureAccessToken(NOW + 20_000)
@@ -619,7 +702,13 @@ describe('X publisher client', () => {
     let authorization: string | null = null
     const x = client(async (_input, init) => {
       authorization = new Headers(init?.headers).get('authorization')
-      return json({ access_token: 'test-access-token', expires_in: 7200 })
+      // Shape: https://docs.x.com/fundamentals/authentication/oauth-2-0/authorization-code
+      return json({
+        token_type: 'bearer',
+        expires_in: 7200,
+        access_token: 'test-access-token',
+        scope: 'tweet.read tweet.write users.read'
+      })
     })
     await x.ensureAccessToken(NOW + 20_000)
     expect(authorization).toBeNull()
@@ -627,9 +716,12 @@ describe('X publisher client', () => {
 
   it('keeps the existing refresh token when a successful rotation omits a replacement', async () => {
     db.prepare('UPDATE x_credentials SET accessTokenExpiresAt = NULL WHERE id = 1').run()
+    // Shape: https://docs.x.com/fundamentals/authentication/oauth-2-0/authorization-code
     const x = client(async () => json({
+      token_type: 'bearer',
+      expires_in: 7200,
       access_token: 'new-test-access-token',
-      expires_in: 7200
+      scope: 'tweet.read tweet.write users.read'
     }))
     await x.ensureAccessToken(NOW + 20_000)
     expect(loadCredentials(db)?.refreshToken).toBe('test-refresh-token')
@@ -648,17 +740,21 @@ describe('X publisher client', () => {
   })
 
   it('matches X usernames after removing one leading @ and reports mismatches as bad', async () => {
-    const matching = client(async () => json({ data: { username: '@test_handle' } }))
+    // Shape: https://docs.x.com/x-api/users/get-my-user
+    const matching = client(async () => json({ data: { id: '123', name: 'Test', username: '@test_handle' } }))
     expect(await matching.probe()).toBe('ok')
+    // Shape: https://docs.x.com/x-api/users/get-my-user
     const unprefixedResponse = client(async () => json({
-      data: { username: 'test_handle' }
+      data: { id: '123', name: 'Test', username: 'test_handle' }
     }))
     expect(await unprefixedResponse.probe()).toBe('ok')
+    // Shape: https://docs.x.com/x-api/users/get-my-user
     const prefixedResponse = client(async () => json({
-      data: { username: '@test_handle' }
+      data: { id: '123', name: 'Test', username: '@test_handle' }
     }), { handle: 'test_handle' })
     expect(await prefixedResponse.probe()).toBe('ok')
-    const mismatch = client(async () => json({ data: { username: 'someone-else' } }))
+    // Shape: https://docs.x.com/x-api/users/get-my-user
+    const mismatch = client(async () => json({ data: { id: '124', name: 'Someone', username: 'someone-else' } }))
     expect(await mismatch.probe()).toBe('bad')
     const failing = client(async () => {
       throw new Error('offline')
@@ -675,15 +771,20 @@ describe('X publisher client', () => {
         url.endsWith('/2/users/me') &&
         requests.filter((item) => item.endsWith('/2/users/me')).length === 1
       ) {
-        return json({}, 401)
+        // Shape: https://docs.x.com/x-api/fundamentals/response-codes-and-errors
+        return json({ title: 'Unauthorized', detail: 'Unauthorized.', type: 'about:blank', status: 401 }, 401)
       }
       if (url.endsWith('/2/oauth2/token')) {
+        // Shape: https://docs.x.com/fundamentals/authentication/oauth-2-0/authorization-code
         return json({
+          token_type: 'bearer',
+          expires_in: 7200,
           access_token: 'refreshed-test-access-token',
-          expires_in: 7200
+          scope: 'tweet.read tweet.write users.read'
         })
       }
-      return json({ data: { username: 'test_handle' } })
+      // Shape: https://docs.x.com/x-api/users/get-my-user
+      return json({ data: { id: '123', name: 'Test', username: 'test_handle' } })
     })
     expect(await x.probe()).toBe('ok')
     expect(requests).toHaveLength(3)

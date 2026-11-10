@@ -77,7 +77,8 @@ async function startStub() {
     if (url.pathname === '/v1/auth/introspect/outbox' || url.pathname === '/v1/auth/introspect/admin') {
       const bearer = /^Bearer\s+(.+)$/i.exec(request.headers.authorization ?? '')?.[1]
       const claims = bearer?.split('.')[1]
-      if (!claims) return writeJson(response, 401, { message: 'Sign in required.' })
+      // Captured from a locally running DFX API (ENVIRONMENT=loc) on 2026-11-10
+      if (!claims) return writeJson(response, 401, { statusCode: 401, message: 'Unauthorized' })
       const identity = JSON.parse(Buffer.from(claims, 'base64url').toString('utf8'))
       // Captured from a locally running DFX API (ENVIRONMENT=loc) on 2026-11-09
       if (tfaMode === 'kyc') return writeJson(response, 403, { code: 'STAFF_KYC_REQUIRED', message: 'Staff access requires a verified name on your account' })
@@ -86,24 +87,26 @@ async function startStub() {
       // Shape: the DFX API, GET /v1/auth/introspect/{admin,outbox} contract
       return writeJson(response, 200, { user: identity.user, account: identity.account, role: identity.role })
     }
-    // Shapes: the DFX API, /v1/auth/mail and /v1/auth/2fa contracts
+    // Shape: the DFX API, POST /v1/auth/mail contract
     if (url.pathname === '/v1/auth/mail') return writeJson(response, 201, {})
+    // Shape: the DFX API, POST /v1/auth/2fa/verify contract
     if (url.pathname === '/v1/auth/2fa/verify') return writeJson(response, tfaMode === 'wrong' ? 400 : 201, {})
     if (url.pathname === '/v1/auth/2fa') {
       // Captured from a locally running DFX API (ENVIRONMENT=loc) on 2026-11-09
       if (request.method === 'GET') return writeJson(response, 403, { code: 'TFA_REQUIRED', message: '2FA required (strict)', level: 'strict' })
+      // Shape: the DFX API, POST /v1/auth/2fa contract
       if (tfaMode === 'setup') return writeJson(response, 201, { type: 'App', secret: 'HANDOFFEXAMPLE', uri: 'otpauth://totp/Outbox?secret=HANDOFFEXAMPLE' })
       // Captured from a locally running DFX API (ENVIRONMENT=loc) on 2026-11-09
       return writeJson(response, 409, { statusCode: 409, message: '2FA already set up', error: 'Conflict' })
     }
     // Shape: https://docs.x.com/fundamentals/authentication/oauth-2-0/authorization-code
-    if (url.pathname === '/2/oauth2/token') return writeJson(response, 200, { access_token: 'handbook-access-token', refresh_token: 'handbook-refresh-token', expires_in: 7200 })
+    if (url.pathname === '/2/oauth2/token') return writeJson(response, 200, { token_type: 'bearer', expires_in: 7200, access_token: 'handbook-access-token', scope: 'tweet.read tweet.write users.read offline.access', refresh_token: 'handbook-refresh-token' })
     // Shape: https://docs.x.com/x-api/users/get-my-user
     if (url.pathname === '/2/users/me') return writeJson(response, 200, { data: { id: '123', name: 'Handbook', username: 'handbook_demo' } })
     if (url.pathname === '/2/media/upload' && request.method === 'POST') {
       await readRequestBody(request)
       // Shape: https://docs.x.com/x-api/media/upload-media
-      return writeJson(response, 200, { data: { id: '1880028106020515840', media_key: '3_1' } })
+      return writeJson(response, 200, { data: { id: '1880028106020515840', media_key: '3_1880028106020515840' } })
     }
     if (url.pathname === '/2/tweets' && request.method === 'POST') {
       const body = JSON.parse(await readRequestBody(request))
@@ -112,8 +115,10 @@ async function startStub() {
         flightStarted()
         await flightRelease
       }
-      if (responseType === 'failed') return writeJson(response, 400, { title: 'Invalid request', detail: 'Fixture failure.' })
-      if (responseType === 'uncertain') return writeJson(response, 500, { title: 'Temporary error' })
+      // Shape: https://docs.x.com/x-api/fundamentals/response-codes-and-errors
+      if (responseType === 'failed') return writeJson(response, 400, { title: 'Invalid request', detail: 'Fixture failure.', type: 'about:blank', status: 400 })
+      // Shape: https://docs.x.com/x-api/fundamentals/response-codes-and-errors
+      if (responseType === 'uncertain') return writeJson(response, 500, { title: 'Temporary error', detail: 'Temporary error.', type: 'about:blank', status: 500 })
       const id = `${xTweetSequence++}`
       // Shape: https://docs.x.com/x-api/posts/create-post
       return writeJson(response, 201, { data: { id, text: body.text } })

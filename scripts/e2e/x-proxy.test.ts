@@ -68,6 +68,7 @@ describe('X transport proxy', () => {
       const chunks: Buffer[] = []
       for await (const chunk of req) chunks.push(Buffer.from(chunk))
       received.push(Buffer.concat(chunks).toString())
+      // Shape: https://docs.x.com/x-api/posts/create-post
       res.writeHead(201, { 'content-type': 'application/json', 'x-test': 'same' })
       res.end('{"data":{"id":"123","text":"marker"}}')
     })

@@ -6,9 +6,15 @@ describe('E2E timeline cleanup', () => {
     const paths: string[] = []
     const found = await findTimelinePosts(async (path) => {
       paths.push(path)
-      // Shapes: https://docs.x.com/x-api/users/get-my-user and https://docs.x.com/x-api/users/get-posts
-      if (path === '/2/users/me') return { data: { id: '123', name: 'Test', username: 'test' } }
-      if (path.includes('pagination_token=')) return { data: [{ id: '2', text: 'Outbox E2E run-id response loss' }], meta: { result_count: 1 } }
+      if (path === '/2/users/me') {
+        // Shape: https://docs.x.com/x-api/users/get-my-user
+        return { data: { id: '123', name: 'Test', username: 'test' } }
+      }
+      if (path.includes('pagination_token=')) {
+        // Shape: https://docs.x.com/x-api/users/get-posts
+        return { data: [{ id: '2', text: 'Outbox E2E run-id response loss' }], meta: { result_count: 1 } }
+      }
+      // Shape: https://docs.x.com/x-api/users/get-posts
       return { data: [{ id: '1', text: 'Unrelated post' }], meta: { result_count: 1, next_token: 'next-page' } }
     }, 'run-id')
     expect(found).toEqual([{ id: '2', text: 'Outbox E2E run-id response loss' }])
@@ -44,8 +50,14 @@ describe('E2E timeline cleanup', () => {
   })
 
   it('does not treat an invalid timeline response as empty', async () => {
-    // Shapes: https://docs.x.com/x-api/users/get-my-user and https://docs.x.com/x-api/users/get-posts
-    const request = async (path: string) => path === '/2/users/me' ? { data: { id: '123', username: 'test' } } : { meta: { result_count: 1 } }
+    const request = async (path: string) => {
+      if (path === '/2/users/me') {
+        // Shape: https://docs.x.com/x-api/users/get-my-user
+        return { data: { id: '123', name: 'Test', username: 'test' } }
+      }
+      // Shape: https://docs.x.com/x-api/users/get-posts
+      return { meta: { result_count: 1 } }
+    }
     await expect(findTimelinePosts(request, 'run-id')).rejects.toThrow('Invalid X timeline response')
   })
 })

@@ -36,7 +36,7 @@
     "src/twitter-text.d.ts",
     "src/x-client.ts"
   ],
-  "inputsSha256": "916fbc4a00623d6bdaf28bc946679d24922b21b72279ae6145a5ea1db9c48f3d",
+  "inputsSha256": "3b79d5e7066521d67a454b0c0543a56c7e570136da9da2ede984328f82fb0554",
   "viewport": {
     "width": 760,
     "height": "visible body content + 24px"

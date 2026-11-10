@@ -27,10 +27,16 @@ describe('X authorization', () => {
         const verifier = new URLSearchParams(String(init?.body)).get('code_verifier')!
         expect(createHash('sha256').update(verifier).digest('base64url')).toBe(challenge)
         // Shape: https://docs.x.com/fundamentals/authentication/oauth-2-0/authorization-code
-        return Response.json({ access_token: 'access-secret', refresh_token: 'refresh-secret' })
+        return Response.json({
+          token_type: 'bearer',
+          expires_in: 7200,
+          access_token: 'access-secret',
+          scope: 'tweet.read tweet.write users.read offline.access',
+          refresh_token: 'refresh-secret'
+        })
       }
       // Shape: https://docs.x.com/x-api/users/get-my-user
-      return Response.json({ data: { id: '1', username: 'example' } })
+      return Response.json({ data: { id: '1', name: 'Example', username: 'example' } })
     }
     await authorize({ envPath, fetch: fetchStub, output: (line) => output.push(line), receiveCode: async (url, state) => {
       const parsed = new URL(url)
@@ -51,9 +57,15 @@ describe('X authorization', () => {
     const before = readFileSync(envPath, 'utf8')
     const fetchStub: typeof fetch = async (input) => String(input).endsWith('/oauth2/token')
       // Shape: https://docs.x.com/fundamentals/authentication/oauth-2-0/authorization-code
-      ? Response.json({ access_token: 'access-secret', refresh_token: 'refresh-secret' })
+      ? Response.json({
+        token_type: 'bearer',
+        expires_in: 7200,
+        access_token: 'access-secret',
+        scope: 'tweet.read tweet.write users.read offline.access',
+        refresh_token: 'refresh-secret'
+      })
       // Shape: https://docs.x.com/x-api/users/get-my-user
-      : Response.json({ data: { id: '1', username: 'different' } })
+      : Response.json({ data: { id: '1', name: 'Different', username: 'different' } })
     await expect(authorize({ envPath, fetch: fetchStub, receiveCode: async () => 'code' })).rejects.toThrow('does not match')
     expect(readFileSync(envPath, 'utf8')).toBe(before)
   })

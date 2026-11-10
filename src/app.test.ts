@@ -54,7 +54,16 @@ function fakeFetch(): typeof fetch {
         headers: { 'content-type': 'application/json' }
       })
     }
-    return new Response('{}', { status: 404 })
+    // Shape: https://docs.x.com/x-api/fundamentals/response-codes-and-errors
+    return new Response(JSON.stringify({
+      title: 'Not Found',
+      detail: 'The endpoint does not exist.',
+      type: 'about:blank',
+      status: 404
+    }), {
+      status: 404,
+      headers: { 'content-type': 'application/json' }
+    })
   }
 }
 
