@@ -409,6 +409,11 @@ export function createOutboxServer(deps: OutboxServerDeps): Server {
     const finishPending = async (item: { id: string; token: string }) => {
       const result = await deps.introspect(item.token, 'OUTBOX')
       if (!result.ok || !hasRoleAccess('OUTBOX', result.role)) {
+        const denied = result.ok || result.status === 401 || result.status === 403
+        if (!denied) {
+          sendHtml(res, 502, renderTfaPage({ error: 'Please try again.' }))
+          return
+        }
         const detail = !result.ok && result.reason === 'staff-kyc-required' ? 'This account has no verified name. Ask an admin to complete it.' : 'Access denied.'
         deps.db.prepare('DELETE FROM auth_pending WHERE id = ?').run(item.id)
         send(res, 403, renderPlainPage('Sign-in not possible', detail), { 'content-type': 'text/html; charset=utf-8', 'set-cookie': pendingCookie('', 0) })
@@ -424,8 +429,7 @@ export function createOutboxServer(deps: OutboxServerDeps): Server {
       return
     }
     if (method === 'GET' && pathname === '/login') { sendHtml(res, 200, renderLoginPage()); return }
-    if (method === 'POST' && pathname.startsWith('/auth/') &&
-      (pathname === '/auth/mail' || pathname === '/auth/tfa' || readCookie(req, COOKIE_NAME) !== null || readCookie(req, 'outbox_pending') !== null) && !originMatchesHost(req)) {
+    if (method === 'POST' && pathname.startsWith('/auth/') && !originMatchesHost(req)) {
       if (wantsJson(req, pathname)) sendJson(res, 403, { ok: false, reason: 'origin-mismatch' })
       else sendHtml(res, 403, renderPlainPage('Forbidden', 'Origin does not match this host.'))
       return
@@ -465,10 +469,9 @@ export function createOutboxServer(deps: OutboxServerDeps): Server {
           await finishPending(item)
           return
         }
-        const check = await upstreamRequest('/v1/auth/2fa?level=Strict', { headers })
-        if (check.status === 200) { await finishPending(item); return }
         const setup = await upstreamRequest('/v1/auth/2fa?level=Strict', { method: 'POST', headers })
-        if (setup.status === 409) { sendHtml(res, 200, renderTfaPage()); return }
+        // 200 is a recent strict proof. It must not issue a cookie; the current code is still required.
+        if (setup.status === 200 || setup.status === 409) { sendHtml(res, 200, renderTfaPage()); return }
         if (setup.status === 201) {
           const body = await setup.json() as { secret?: unknown; uri?: unknown }
           if (typeof body.secret === 'string' && typeof body.uri === 'string') { sendHtml(res, 200, renderTfaPage({ secret: body.secret, uri: body.uri })); return }

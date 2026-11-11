@@ -1,3 +1,3 @@
 # Enter an authenticator code
 
-For an existing authenticator, the page shows a six-digit code field and a sign-in button.
+Every sign-in asks for the current six-digit code, including when an authenticator is already set up. A recent sign-in does not skip this step. The page shows the code field and a sign-in button.

@@ -55,3 +55,37 @@ describe('decision comment migration', () => {
     reopened.close()
   })
 })
+
+describe('audit actor migration', () => {
+  it('adds actorKind to an old audit table and tolerates opening the file again', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'legacy-audit-'))
+    tempDirs.push(dir)
+    const file = join(dir, 'state.sqlite')
+    const oldDb = new Database(file)
+    oldDb.exec(`CREATE TABLE audit (
+      id TEXT PRIMARY KEY,
+      at INTEGER NOT NULL,
+      event TEXT NOT NULL,
+      bundleId TEXT,
+      entryId TEXT,
+      actorUser INTEGER,
+      actorAccount INTEGER,
+      reason TEXT
+    )`)
+    oldDb.close()
+
+    const migrated = openDatabase(file)
+    const event = { at: 1, event: 'published' as const, bundleId: null, entryId: null, reason: null }
+    writeAudit(migrated, { ...event, actorUser: null, actorAccount: null })
+    expect(migrated.prepare('SELECT actorKind, actorUser, actorAccount FROM audit').get()).toEqual({ actorKind: 'system', actorUser: null, actorAccount: null })
+    migrated.close()
+
+    const reopened = openDatabase(file)
+    writeAudit(reopened, { ...event, at: 2, actorUser: 17, actorAccount: 23 })
+    expect(reopened.prepare('SELECT actorKind, actorUser, actorAccount FROM audit ORDER BY at').all()).toEqual([
+      { actorKind: 'system', actorUser: null, actorAccount: null },
+      { actorKind: 'user', actorUser: 17, actorAccount: 23 }
+    ])
+    reopened.close()
+  })
+})

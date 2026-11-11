@@ -44,12 +44,12 @@ Mail login does **not** elevate Admin. Approvers stay on wallet sign-in.
 
 1. Outbox requests `POST /v1/auth/mail` with a redirect URI pointing to its callback. The mail opens the DFX mail-login page, which calls `GET /v1/auth/mail/redirect?code=…`; its 200 JSON `redirectUrl` is opened by the page.
 2. The callback receives a staff JWT with `tfaRequired`, stores it in a ten-minute pending session, and redirects to `/auth/tfa` without the JWT in the URL. It does not set a working cookie yet.
-3. Outbox checks `GET /v1/auth/2fa?level=Strict`. If no proof exists it requests setup: a new secret and URI are displayed for enrollment, while a 409 means the authenticator is already set up. The user enters the code on Outbox.
-4. Outbox calls `POST /v1/auth/2fa/verify` itself because DFX binds the proof to the caller's IP address. Outbox then calls `GET /v1/auth/introspect/outbox`; only a 200 issues the working cookie. Missing verified staff name is a hard error.
+3. Every sign-in asks for the current authenticator code. A recent sign-in does not skip this step. Outbox requests `POST /v1/auth/2fa?level=Strict`. A 201 shows the new secret and URI for enrollment. A 409 means the authenticator is already set up and shows only the code field.
+4. Outbox calls `POST /v1/auth/2fa/verify` itself because DFX binds the proof to the caller's IP address. Outbox then calls `GET /v1/auth/introspect/outbox`. The working cookie is issued only after verify returns 201 and introspect returns 200. If introspect returns a server error, the pending session stays and the page says "Please try again." Missing verified staff name is a hard error.
 
 **Approver login**
 
-Outbox requests `GET /v1/auth/signMessage`, has the browser wallet sign it, and sends the address and signature to `POST /v1/auth/signIn`. The 201 response contains `accessToken`; Outbox checks `GET /v1/auth/introspect/admin` before issuing the working cookie. API clients may submit an access token to `POST /auth/callback`, which tries admin introspection and then outbox on 403.
+Outbox requests `GET /v1/auth/signMessage`, has the browser wallet sign it, and sends the address and signature to `POST /v1/auth/signIn`. The 201 response contains `accessToken`; Outbox checks `GET /v1/auth/introspect/admin` before issuing the working cookie. API clients may submit an access token to `POST /auth/callback`, which tries admin introspection and then outbox on 403. API clients that `POST /auth/wallet` or `POST /auth/callback` must send an `Origin` whose host matches the Outbox host.
 
 Browser/SSR uses the cookie. Outbox always sends `Authorization: Bearer` to the DFX API. API routes accept cookie **or** Bearer.
 
@@ -113,7 +113,7 @@ sequenceDiagram
   API-->>P: 200 JSON redirectUrl; page navigates
   P->>B: GET /auth/callback?session=JWT
   B-->>P: Pending cookie; 302 /auth/tfa
-  B->>API: GET/POST /v1/auth/2fa?level=Strict
+  B->>API: POST /v1/auth/2fa?level=Strict
   P->>B: POST /auth/tfa (code)
   B->>API: POST /v1/auth/2fa/verify
   B->>API: GET /v1/auth/introspect/outbox Bearer
@@ -285,7 +285,7 @@ Bundles and scheduled_posts store `authoredByUser` + `authoredByAccount` (JWT `u
 | Publish without approval | no endpoint; no DOM control; tests |
 | Double post on X | no auto-retry after accepted tweet; retry only `failed`; `uncertain` not requeued |
 | Token in logs | denylist |
-| Cross-origin cookie POST | Origin or Referer must match the host; `Origin: null` is rejected. `Referrer-Policy: same-origin` keeps cross-origin referrers private while allowing same-origin forms. |
+| Cross-origin auth POST | Every `POST` under `/auth/`, including wallet and callback, requires an Origin or Referer host match. `Origin: null` is rejected. `Referrer-Policy: same-origin` keeps cross-origin referrers private while allowing same-origin forms. |
 
 ---
 

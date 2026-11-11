@@ -7,7 +7,7 @@ import { createRequire } from 'node:module'
 import { deflateSync } from 'node:zlib'
 import Database from 'better-sqlite3'
 import { HDNodeWallet, Wallet } from 'ethers'
-import { findMailOtp, parseEnv, readPrivateEnv, redactKnownSecrets, saveRefreshToken, scheduledSlot, totp, unexpectedPostStatus } from './helpers'
+import { duplicateContentFailure, findMailOtp, parseEnv, readPrivateEnv, redactKnownSecrets, saveRefreshToken, scheduledSlot, totp, unexpectedPostStatus } from './helpers'
 import { createXProxy } from './x-proxy'
 import { cleanupTimelinePosts, findTimelinePosts } from './timeline'
 
@@ -365,6 +365,12 @@ async function main(): Promise<void> {
     const duplicate = await waitStatus(ids[2]!, 'failed', cSlot.epoch + 120_000)
     const first = (await posts()).find((post) => post.bundleId === ids[0])
     check(first?.channel?.url && duplicate.channel, 'Retry prerequisites missing')
+    const duplicatePostId = duplicate.channel.postId
+    const db = new Database(dbPath, { readonly: true, fileMustExist: true })
+    try {
+      const rejection = duplicateContentFailure(db, duplicatePostId, secrets)
+      if (rejection) fail(rejection)
+    } finally { db.close() }
     await deleteTweet(first.channel.url.split('/').at(-1)!)
     await postJson(`/api/posts/${duplicate.channel.postId}/retry`, adminCookie, {})
     const retried = await waitStatus(ids[2]!, 'sent', Date.now() + 120_000)

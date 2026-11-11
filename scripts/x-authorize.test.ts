@@ -3,7 +3,16 @@ import { chmodSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync }
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { authorize, validState } from './x-authorize'
+import { authorize, startAuthorizationCallback, validState } from './x-authorize'
+
+// Captured from a local X refresh response on 2026-11-10
+const TOKEN_RESPONSE = {
+  token_type: 'bearer',
+  expires_in: 7200,
+  access_token: 'access-secret',
+  scope: 'offline.access tweet.write media.write users.read tweet.read',
+  refresh_token: 'refresh-secret'
+}
 
 const directories: string[] = []
 afterEach(() => { for (const dir of directories.splice(0)) rmSync(dir, { recursive: true, force: true }) })
@@ -26,14 +35,7 @@ describe('X authorization', () => {
       if (String(input).endsWith('/oauth2/token')) {
         const verifier = new URLSearchParams(String(init?.body)).get('code_verifier')!
         expect(createHash('sha256').update(verifier).digest('base64url')).toBe(challenge)
-        // Shape: https://docs.x.com/fundamentals/authentication/oauth-2-0/authorization-code
-        return Response.json({
-          token_type: 'bearer',
-          expires_in: 7200,
-          access_token: 'access-secret',
-          scope: 'tweet.read tweet.write users.read offline.access',
-          refresh_token: 'refresh-secret'
-        })
+        return Response.json(TOKEN_RESPONSE)
       }
       // Shape: https://docs.x.com/x-api/users/get-my-user
       return Response.json({ data: { id: '1', name: 'Example', username: 'example' } })
@@ -56,14 +58,7 @@ describe('X authorization', () => {
     const envPath = fixture()
     const before = readFileSync(envPath, 'utf8')
     const fetchStub: typeof fetch = async (input) => String(input).endsWith('/oauth2/token')
-      // Shape: https://docs.x.com/fundamentals/authentication/oauth-2-0/authorization-code
-      ? Response.json({
-        token_type: 'bearer',
-        expires_in: 7200,
-        access_token: 'access-secret',
-        scope: 'tweet.read tweet.write users.read offline.access',
-        refresh_token: 'refresh-secret'
-      })
+      ? Response.json(TOKEN_RESPONSE)
       // Shape: https://docs.x.com/x-api/users/get-my-user
       : Response.json({ data: { id: '1', name: 'Different', username: 'different' } })
     await expect(authorize({ envPath, fetch: fetchStub, receiveCode: async () => 'code' })).rejects.toThrow('does not match')
@@ -79,5 +74,29 @@ describe('X authorization', () => {
     expect(validState('state', 'state')).toBe(true)
     expect(validState('state', 'other')).toBe(false)
     expect(validState('', 'state')).toBe(false)
+  })
+
+  it('does not write when X omits a required scope', async () => {
+    const envPath = fixture()
+    const before = readFileSync(envPath, 'utf8')
+    const fetchStub: typeof fetch = async (input) => String(input).endsWith('/oauth2/token')
+      ? Response.json({ ...TOKEN_RESPONSE, scope: 'offline.access tweet.write users.read tweet.read' })
+      : Response.json({ data: { id: '1', name: 'Example', username: 'example' } })
+    await expect(authorize({ envPath, fetch: fetchStub, receiveCode: async () => 'code' })).rejects.toThrow('X did not grant: media.write')
+    expect(readFileSync(envPath, 'utf8')).toBe(before)
+  })
+
+  it('answers a wrong state with 400 and still accepts the right callback', async () => {
+    const session = await startAuthorizationCallback('expected-state')
+    try {
+      const wrong = await fetch(`http://127.0.0.1:${session.port}/callback?state=other-state&code=nope`)
+      expect(wrong.status).toBe(400)
+      expect(await wrong.text()).toBe('Authorization failed.')
+      const right = await fetch(`http://127.0.0.1:${session.port}/callback?state=expected-state&code=granted-code`)
+      expect(right.status).toBe(200)
+      await expect(session.result).resolves.toBe('granted-code')
+    } finally {
+      await session.close()
+    }
   })
 })

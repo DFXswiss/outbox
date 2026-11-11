@@ -1,3 +1,3 @@
 # Sign in
 
-Composers sign in using an email link and their authenticator. Approvers can connect a wallet.
+Composers sign in using an email link and then the current authenticator code. Approvers can connect a wallet.

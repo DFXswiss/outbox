@@ -1,3 +1,10 @@
+function utf8ToHex(text) {
+  const bytes = new TextEncoder().encode(text)
+  let hex = '0x'
+  for (const byte of bytes) hex += byte.toString(16).padStart(2, '0')
+  return hex
+}
+
 const button = document.querySelector('#wallet-login')
 const message = document.querySelector('#wallet-message')
 
@@ -14,7 +21,7 @@ if (!window.ethereum) {
       const challenge = await fetch(`/auth/wallet/message?address=${encodeURIComponent(address)}`)
       if (!challenge.ok) throw new Error('Sign-in not possible.')
       const { message: text } = await challenge.json()
-      const signature = await window.ethereum.request({ method: 'personal_sign', params: [text, address] })
+      const signature = await window.ethereum.request({ method: 'personal_sign', params: [utf8ToHex(text), address] })
       const response = await fetch('/auth/wallet', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ address, signature }) })
       if (!response.ok) throw new Error('Sign-in not possible.')
       location.href = '/'

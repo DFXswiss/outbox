@@ -32,6 +32,9 @@ let written = []
 let preservedStageRoot = null
 let xTweetSequence = 1_000_000_000
 let tfaMode = 'setup'
+// Shape captured from a locally running DFX API (ENVIRONMENT=loc) on 2026-11-10; secret replaced by a short placeholder because the handbook is public and its content gate rejects long encoded values
+const totpSecret = 'EXAMPLESECRET'
+const totpUri = 'otpauth://totp/DFX.swiss%3Acomposer%40example.com?secret=EXAMPLESECRET&issuer=DFX.swiss'
 const xResponses = new Map([
   ['The shipment update is ready for review.', 'flight'],
   ['The weekly schedule is ready to share.', 'failed'],
@@ -71,6 +74,11 @@ function writeJson(response, status, value) {
   response.end(JSON.stringify(value))
 }
 
+function writeEmpty(response, status) {
+  response.writeHead(status)
+  response.end()
+}
+
 async function startStub() {
   stub = createServer(async (request, response) => {
     const url = new URL(request.url ?? '/', 'http://127.0.0.1')
@@ -80,23 +88,30 @@ async function startStub() {
       // Captured from a locally running DFX API (ENVIRONMENT=loc) on 2026-11-10
       if (!claims) return writeJson(response, 401, { statusCode: 401, message: 'Unauthorized' })
       const identity = JSON.parse(Buffer.from(claims, 'base64url').toString('utf8'))
+      // No response body was captured for this failure. The page depends only on the status.
+      if (tfaMode === 'retry') return writeEmpty(response, 502)
       // Captured from a locally running DFX API (ENVIRONMENT=loc) on 2026-11-09
       if (tfaMode === 'kyc') return writeJson(response, 403, { code: 'STAFF_KYC_REQUIRED', message: 'Staff access requires a verified name on your account' })
       // Captured from a locally running DFX API (ENVIRONMENT=loc) on 2026-11-09
       if (url.pathname.endsWith('/admin') && identity.role !== 'Admin') return writeJson(response, 403, { statusCode: 403, message: 'Forbidden resource', error: 'Forbidden' })
-      // Shape: the DFX API, GET /v1/auth/introspect/{admin,outbox} contract
+      // Captured from a locally running DFX API (ENVIRONMENT=loc) on 2026-11-10
+      // Sample was {"user":16,"account":16,"role":"Outbox"}. Values follow the signed token.
       return writeJson(response, 200, { user: identity.user, account: identity.account, role: identity.role })
     }
-    // Shape: the DFX API, POST /v1/auth/mail contract
-    if (url.pathname === '/v1/auth/mail') return writeJson(response, 201, {})
-    // Shape: the DFX API, POST /v1/auth/2fa/verify contract
-    if (url.pathname === '/v1/auth/2fa/verify') return writeJson(response, tfaMode === 'wrong' ? 400 : 201, {})
+    // Captured from a locally running DFX API (ENVIRONMENT=loc) on 2026-11-10
+    if (url.pathname === '/v1/auth/mail') return writeEmpty(response, 201)
+    if (url.pathname === '/v1/auth/2fa/verify') {
+      // Captured from a locally running DFX API (ENVIRONMENT=loc) on 2026-11-10
+      if (tfaMode === 'wrong') return writeJson(response, 403, { statusCode: 403, message: 'Invalid or expired 2FA token', error: 'Forbidden' })
+      // Captured from a locally running DFX API (ENVIRONMENT=loc) on 2026-11-10
+      return writeEmpty(response, 201)
+    }
     if (url.pathname === '/v1/auth/2fa') {
-      // Captured from a locally running DFX API (ENVIRONMENT=loc) on 2026-11-09
+      // Captured from a locally running DFX API (ENVIRONMENT=loc) on 2026-11-10
       if (request.method === 'GET') return writeJson(response, 403, { code: 'TFA_REQUIRED', message: '2FA required (strict)', level: 'strict' })
-      // Shape: the DFX API, POST /v1/auth/2fa contract
-      if (tfaMode === 'setup') return writeJson(response, 201, { type: 'App', secret: 'HANDOFFEXAMPLE', uri: 'otpauth://totp/Outbox?secret=HANDOFFEXAMPLE' })
-      // Captured from a locally running DFX API (ENVIRONMENT=loc) on 2026-11-09
+      // Captured from a locally running DFX API (ENVIRONMENT=loc) on 2026-11-10
+      if (tfaMode === 'setup') return writeJson(response, 201, { type: 'App', secret: totpSecret, uri: totpUri })
+      // Captured from a locally running DFX API (ENVIRONMENT=loc) on 2026-11-10
       return writeJson(response, 409, { statusCode: 409, message: '2FA already set up', error: 'Conflict' })
     }
     // Shape: https://docs.x.com/fundamentals/authentication/oauth-2-0/authorization-code
@@ -475,7 +490,7 @@ async function main() {
   await Promise.all([loginPage.waitForNavigation(), loginPage.locator('form[action="/auth/mail"] button').click()])
   await capture(loginPage, '06-login', '02-mail-sent', ['Open the link in the email to continue'])
   await loginPage.goto(`http://127.0.0.1:${appPort}/auth/callback?session=${encodeURIComponent(jwt('OUTBOX'))}`)
-  await capture(loginPage, '06-login', '03-tfa-setup', ['HANDOFFEXAMPLE', 'six-digit code'])
+  await capture(loginPage, '06-login', '03-tfa-setup', [totpSecret, 'six-digit code'])
   tfaMode = 'configured'
   await loginPage.reload()
   await capture(loginPage, '06-login', '04-tfa-code', ['six-digit code'])
@@ -487,6 +502,11 @@ async function main() {
   await loginPage.locator('#code').fill('123456')
   await Promise.all([loginPage.waitForNavigation(), loginPage.locator('form[action="/auth/tfa"] button').click()])
   await capture(loginPage, '06-login', '06-kyc', ['no verified name'])
+  tfaMode = 'retry'
+  await loginPage.goto(`http://127.0.0.1:${appPort}/auth/callback?session=${encodeURIComponent(jwt('OUTBOX'))}`)
+  await loginPage.locator('#code').fill('123456')
+  await Promise.all([loginPage.waitForNavigation(), loginPage.locator('form[action="/auth/tfa"] button').click()])
+  await capture(loginPage, '06-login', '07-tfa-retry', ['Please try again.', 'six-digit code'])
   tfaMode = 'configured'
   await loginContext.close()
 

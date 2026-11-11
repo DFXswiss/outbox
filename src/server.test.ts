@@ -29,6 +29,33 @@ const TOKEN_B = 'token-outbox-b'
 const TOKEN_ADMIN = 'token-admin'
 const SEKRIT_BEARER = 'sekrit-bearer-aabbcc'
 const SEKRIT_COOKIE = 'sekrit-cookie-xxyyzz'
+const WALLET_ADDRESS = '0x1433a4c9eFA0525299B05a6d9f31016Da254c2f2'
+
+// Captured from a locally running DFX API (ENVIRONMENT=loc) on 2026-11-10
+const SIGN_MESSAGE = {
+  message: '[loc]_By_signing_this_message,_you_confirm_that_you_are_the_sole_owner_of_the_provided_Blockchain_address._Your_ID:_0x1433a4c9eFA0525299B05a6d9f31016Da254c2f2',
+  blockchains: ['Ethereum', 'Sepolia', 'BinanceSmartChain', 'Arbitrum', 'Optimism', 'Polygon', 'Base', 'Gnosis', 'Plasma', 'Haqq', 'Citrea', 'CitreaTestnet']
+}
+
+// Captured from a locally running DFX API (ENVIRONMENT=loc) on 2026-11-10
+// secret replaced
+const TOTP_SETUP = {
+  type: 'App',
+  secret: 'JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP',
+  uri: 'otpauth://totp/DFX.swiss%3Aexample.com?secret=JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP&issuer=DFX.swiss'
+}
+
+// Captured from a locally running DFX API (ENVIRONMENT=loc) on 2026-11-10
+const VERIFY_FORBIDDEN = { statusCode: 403, message: 'Invalid or expired 2FA token', error: 'Forbidden' }
+
+// Captured from a locally running DFX API (ENVIRONMENT=loc) on 2026-11-10
+const TFA_REQUIRED = { code: 'TFA_REQUIRED', message: '2FA required (strict)', level: 'strict' }
+
+// Captured from a locally running DFX API (ENVIRONMENT=loc) on 2026-11-10
+const TFA_CONFLICT = { statusCode: 409, message: '2FA already set up', error: 'Conflict' }
+
+// Captured from a locally running DFX API (ENVIRONMENT=loc) on 2026-11-10
+const INTROSPECT_OUTBOX = { user: 16, account: 16, role: 'Outbox' }
 
 const PEOPLE: Record<string, Identity> = {
   [TOKEN_A]: { user: 1, account: 1, role: 'OUTBOX' },
@@ -247,18 +274,20 @@ describe('mail login', () => {
   })
 
   it('shows only the code field when setup says it already exists', async () => {
-    const h = await start({ fetch: async (_input, init) => {
-      if (init?.method === 'POST') {
-        // Captured from a locally running DFX API (ENVIRONMENT=loc) on 2026-11-09
-        return Response.json({ statusCode: 409, message: '2FA already set up', error: 'Conflict' }, { status: 409 })
-      }
-      // Captured from a locally running DFX API (ENVIRONMENT=loc) on 2026-11-09
-      return Response.json({ code: 'TFA_REQUIRED', message: '2FA required (strict)', level: 'strict' }, { status: 403 })
+    const calls: Array<{ url: string; method: string }> = []
+    const h = await start({ fetch: async (input, init) => {
+      const method = init?.method ?? 'GET'
+      calls.push({ url: String(input), method })
+      if (method === 'POST') return Response.json(TFA_CONFLICT, { status: 409 })
+      return Response.json(TFA_REQUIRED, { status: 403 })
     } })
     const callback = await call(h.port, `/auth/callback?session=${encodeURIComponent(mailToken())}`)
     const cookie = callback.headers.get('set-cookie')!.split(';')[0]!
     const result = await call(h.port, '/auth/tfa', { headers: { cookie } })
+    expect(calls).toEqual([{ url: 'https://identity.invalid/v1/auth/2fa?level=Strict', method: 'POST' }])
     expect(result.status).toBe(200)
+    expect(result.location).toBeNull()
+    expect(result.headers.get('set-cookie')).toBeNull()
     expect(result.text).toContain('name="code"')
     expect(result.text).not.toContain('Secret:')
   })
@@ -284,8 +313,7 @@ describe('mail login', () => {
     let calls = 0
     const h = await start({ fetch: async () => {
       calls += 1
-      // Shape: the DFX API, POST /v1/auth/2fa/verify contract
-      return new Response(null, { status: 400 })
+      return Response.json(VERIFY_FORBIDDEN, { status: 403 })
     } })
     const callback = await call(h.port, `/auth/callback?session=${encodeURIComponent(mailToken())}`)
     const cookie = callback.headers.get('set-cookie')!.split(';')[0]!
@@ -297,38 +325,38 @@ describe('mail login', () => {
     expect(wrong.text).toContain('name="code"')
   })
 
-  it('uses an existing strict TOTP proof without setup or verification', async () => {
-    const token = mailToken()
-    let calls = 0
-    const h = await start({ fetch: async () => {
-      calls += 1
-      // Shape: the DFX API, GET /v1/auth/2fa contract
+  it('shows the code field when a strict proof already exists', async () => {
+    const calls: Array<{ url: string; method: string }> = []
+    const h = await start({ fetch: async (input, init) => {
+      calls.push({ url: String(input), method: init?.method ?? 'GET' })
+      // Captured from a locally running DFX API (ENVIRONMENT=loc) on 2026-11-10
+      // Empty 200. A recent strict proof must still show the code field.
       return new Response(null, { status: 200 })
-    }, introspect: async () => ({ ok: true, user: 1, account: 1, role: 'OUTBOX' }) })
-    const callback = await call(h.port, `/auth/callback?session=${encodeURIComponent(token)}`)
+    } })
+    const callback = await call(h.port, `/auth/callback?session=${encodeURIComponent(mailToken())}`)
     const cookie = callback.headers.get('set-cookie')!.split(';')[0]!
     const result = await call(h.port, '/auth/tfa', { headers: { cookie } })
-    expect(result.location).toBe('/')
-    expect(calls).toBe(1)
+    expect(calls).toEqual([{ url: 'https://identity.invalid/v1/auth/2fa?level=Strict', method: 'POST' }])
+    expect(result.status).toBe(200)
+    expect(result.location).toBeNull()
+    expect(result.headers.get('set-cookie')).toBeNull()
+    expect(result.text).toContain('name="code"')
+    expect(result.text).not.toContain('Secret:')
+    expect(h.db.prepare('SELECT COUNT(*) AS n FROM auth_pending').get()).toEqual({ n: 1 })
   })
   it('creates a pending cookie, verifies TOTP with the same token, and consumes it', async () => {
-    const token = mailToken()
+    const token = mailToken({ user: 16, account: 16 })
     const calls: Array<{ url: string; init?: RequestInit }> = []
     const backend: typeof fetch = async (input, init) => {
       const url = String(input)
       calls.push({ url, init })
-      // Shape: the DFX API, POST /v1/auth/mail contract
+      // Captured from a locally running DFX API (ENVIRONMENT=loc) on 2026-11-10
       if (url.endsWith('/v1/auth/mail')) return new Response(null, { status: 201 })
-      // Shape: the DFX API, GET /v1/auth/introspect/outbox contract
-      if (url.endsWith('/v1/auth/introspect/outbox')) return Response.json({ user: 1, account: 1, role: 'Outbox' })
-      // Shape: the DFX API, POST /v1/auth/2fa/verify contract
+      if (url.endsWith('/v1/auth/introspect/outbox')) return Response.json(INTROSPECT_OUTBOX)
+      // Captured from a locally running DFX API (ENVIRONMENT=loc) on 2026-11-10
       if (url.includes('/2fa/verify')) return new Response(null, { status: 201 })
-      if (init?.method === 'POST') {
-        // Shape: the DFX API, POST /v1/auth/2fa contract
-        return Response.json({ type: 'App', secret: 'SETUPSECRET', uri: 'otpauth://totp/example' }, { status: 201 })
-      }
-      // Captured from a locally running DFX API (ENVIRONMENT=loc) on 2026-11-09
-      return Response.json({ code: 'TFA_REQUIRED', message: '2FA required (strict)', level: 'strict' }, { status: 403 })
+      if (init?.method === 'POST') return Response.json(TOTP_SETUP, { status: 201 })
+      return Response.json(TFA_REQUIRED, { status: 403 })
     }
     const h = await start({ fetch: backend, introspect: createHttpIntrospect({ baseUrl: 'https://identity.invalid', jwtSecret: 'test-jwt-secret', fetch: backend }) })
     const login = await call(h.port, '/login')
@@ -342,8 +370,10 @@ describe('mail login', () => {
     expect(callback.text).not.toContain(token)
     const cookie = callback.headers.get('set-cookie')!.split(';')[0]!
     const page = await call(h.port, '/auth/tfa', { headers: { cookie } })
-    expect(page.text).toContain('SETUPSECRET')
+    expect(page.text).toContain(TOTP_SETUP.secret)
+    expect(page.text).toContain('otpauth://totp/DFX.swiss%3Aexample.com?secret=JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP&amp;issuer=DFX.swiss')
     expect(page.text).not.toContain(token)
+    expect(calls.filter((item) => item.url.endsWith('/v1/auth/2fa?level=Strict')).map((item) => item.init?.method)).toEqual(['POST'])
     const verified = await call(h.port, '/auth/tfa', { method: 'POST', headers: { cookie, 'content-type': 'application/x-www-form-urlencoded' }, body: 'code=123456' })
     expect(verified.location).toBe('/')
     const verifyCall = calls.find((item) => item.url.includes('/2fa/verify'))!
@@ -365,38 +395,98 @@ describe('mail login', () => {
   })
 
   it('shows the KYC error without a code field after verification', async () => {
-    const h = await start({ fetch: async () => {
-      // Shape: the DFX API, POST /v1/auth/2fa/verify contract
-      return new Response(null, { status: 201 })
-    }, introspect: async () => ({ ok: false, status: 403, reason: 'staff-kyc-required' }) })
+    const h = await start({ fetch: async () => new Response(null, { status: 201 }), introspect: async () => ({ ok: false, status: 403, reason: 'staff-kyc-required' }) })
     const callback = await call(h.port, `/auth/callback?session=${encodeURIComponent(mailToken())}`)
     const cookie = callback.headers.get('set-cookie')!.split(';')[0]!
     const result = await call(h.port, '/auth/tfa', { method: 'POST', headers: { cookie, 'content-type': 'application/x-www-form-urlencoded' }, body: 'code=123456' })
     expect(result.text).toContain('This account has no verified name.')
     expect(result.text).not.toContain('name="code"')
   })
+
+  it('keeps the pending session when introspection fails after a valid code', async () => {
+    let attempts = 0
+    const h = await start({
+      fetch: async () => new Response(null, { status: 201 }),
+      introspect: async () => {
+        attempts += 1
+        if (attempts === 1) return { ok: false, status: 502 }
+        return { ok: true, user: 1, account: 1, role: 'OUTBOX' }
+      }
+    })
+    const callback = await call(h.port, `/auth/callback?session=${encodeURIComponent(mailToken())}`)
+    const cookie = callback.headers.get('set-cookie')!.split(';')[0]!
+    const submitCode = () => call(h.port, '/auth/tfa', { method: 'POST', headers: { cookie, 'content-type': 'application/x-www-form-urlencoded' }, body: 'code=123456' })
+    const first = await submitCode()
+    expect(first.status).toBe(502)
+    expect(first.text).toContain('<p class="callout error">Please try again.</p>')
+    expect(first.text).not.toContain('Invalid code')
+    expect(first.text).not.toContain('Please try again later.')
+    expect(first.text).toContain('name="code"')
+    expect(first.headers.get('set-cookie')).toBeNull()
+    expect(h.db.prepare('SELECT COUNT(*) AS n FROM auth_pending').get()).toEqual({ n: 1 })
+    const second = await submitCode()
+    expect(second.location).toBe('/')
+    expect(second.headers.get('set-cookie')).toContain('outbox=')
+  })
 })
 
 describe('wallet and API login', () => {
   it('proxies the challenge and 201 sign-in before issuing a cookie', async () => {
-    const h = await start({ fetch: async (input, init) => {
-      const url = String(input)
-      if (url.includes('/signMessage')) {
-        // Shape: the DFX API, GET /v1/auth/signMessage contract
-        return Response.json({ message: 'Sign this message' })
+    const roles: string[] = []
+    const h = await start({
+      fetch: async (input, init) => {
+        const url = String(input)
+        if (url.includes('/signMessage')) return Response.json(SIGN_MESSAGE)
+        expect(JSON.parse(String(init?.body))).toEqual({ address: WALLET_ADDRESS, signature: 'signed' })
+        // The captured accessToken was a JWT. This stand-in is the token local introspection accepts.
+        return Response.json({ accessToken: TOKEN_ADMIN }, { status: 201 })
+      },
+      introspect: async (token, role) => {
+        roles.push(role)
+        return introspect(token, role)
       }
-      expect(JSON.parse(String(init?.body))).toEqual({ address: '0x123', signature: 'signed' })
-      // Shape: the DFX API, POST /v1/auth/signIn contract
-      return Response.json({ accessToken: TOKEN_ADMIN }, { status: 201 })
-    } })
-    const challenge = await call(h.port, '/auth/wallet/message?address=0x123')
-    expect(challenge.json).toEqual({ message: 'Sign this message' })
-    const signed = await call(h.port, '/auth/wallet', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ address: '0x123', signature: 'signed' }) })
+    })
+    const challenge = await call(h.port, `/auth/wallet/message?address=${WALLET_ADDRESS}`)
+    expect(challenge.json).toEqual({ message: SIGN_MESSAGE.message })
+    const signed = await call(h.port, '/auth/wallet', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ address: WALLET_ADDRESS, signature: 'signed' }) })
     expect(signed.json).toEqual({ ok: true })
     expect(signed.headers.get('set-cookie')).toContain('outbox=')
+    expect(roles).toEqual(['ADMIN'])
     const logout = await call(h.port, '/auth/logout', { method: 'POST', headers: { cookie: `outbox=${TOKEN_ADMIN}` } })
     expect(logout.location).toBe('/login')
     expect(logout.headers.get('set-cookie')).toContain('Max-Age=0')
+  })
+
+  it('does not set a cookie when admin introspection refuses the wallet', async () => {
+    const roles: string[] = []
+    const h = await start({
+      fetch: async () => Response.json({ accessToken: TOKEN_ADMIN }, { status: 201 }),
+      introspect: async (_token, role) => {
+        roles.push(role)
+        return { ok: false, status: 403 }
+      }
+    })
+    const signed = await call(h.port, '/auth/wallet', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ address: WALLET_ADDRESS, signature: 'signed' }) })
+    expect(signed.status).toBe(403)
+    expect(signed.headers.get('set-cookie')).toBeNull()
+    expect(signed.json).toEqual({ ok: false })
+    expect(roles).toEqual(['ADMIN'])
+  })
+
+  it('rejects a foreign or missing origin before wallet or callback can set a cookie', async () => {
+    const h = await start({ fetch: async () => Response.json({ accessToken: TOKEN_ADMIN }, { status: 201 }) })
+    const walletBody = JSON.stringify({ address: WALLET_ADDRESS, signature: 'signed' })
+    const callbackBody = JSON.stringify({ accessToken: TOKEN_ADMIN })
+    for (const origin of ['https://attacker.invalid', null] as const) {
+      const wallet = await call(h.port, '/auth/wallet', { method: 'POST', origin, headers: { 'content-type': 'application/json' }, body: walletBody })
+      expect(wallet.status).toBe(403)
+      expect(wallet.headers.get('set-cookie')).toBeNull()
+      expect(wallet.json).toEqual({ ok: false, reason: 'origin-mismatch' })
+      const callback = await call(h.port, '/auth/callback', { method: 'POST', origin, headers: { 'content-type': 'application/json' }, body: callbackBody })
+      expect(callback.status).toBe(403)
+      expect(callback.headers.get('set-cookie')).toBeNull()
+      expect(callback.json).toEqual({ ok: false, reason: 'origin-mismatch' })
+    }
   })
 
   it('falls back to Outbox introspection for the API token callback', async () => {

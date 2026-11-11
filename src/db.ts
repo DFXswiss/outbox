@@ -101,6 +101,10 @@ export function openDatabase(filePath: string) {
   if (!entryColumns.some((column) => column.name === 'decisionComment')) {
     db.exec('ALTER TABLE entries ADD COLUMN decisionComment TEXT')
   }
+  const auditColumns = db.pragma('table_info(audit)') as Array<{ name: string }>
+  if (!auditColumns.some((column) => column.name === 'actorKind')) {
+    db.exec('ALTER TABLE audit ADD COLUMN actorKind TEXT')
+  }
   return db
 }
 

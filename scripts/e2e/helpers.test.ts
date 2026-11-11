@@ -2,7 +2,7 @@ import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
-import { findMailOtp, saveRefreshToken, scheduledSlot, totp, unexpectedPostStatus } from './helpers'
+import { duplicateContentFailure, findMailOtp, saveRefreshToken, scheduledSlot, totp, unexpectedPostStatus } from './helpers'
 import { parseZurichDateTime } from '../../src/time'
 import { openDatabase } from '../../src/db'
 
@@ -21,6 +21,14 @@ describe('E2E helpers', () => {
         .toBe('X publish failed: HTTP 402: Payment Required: credits depleted; credential [redacted]')
       expect(unexpectedPostStatus(db, 'post-2', 'uncertain', [])).toBe('X publish uncertain: Other post error')
       expect(unexpectedPostStatus(db, 'missing', 'failed', [])).toBe('X publish failed: No stored error detail')
+      insert.run('dup', 'post-dup', 40, 'Duplicate Content')
+      insert.run('older-dup', 'post-mixed', 50, 'duplicate content')
+      insert.run('newer-other', 'post-mixed', 60, 'HTTP 403: Forbidden')
+      insert.run('secret', 'post-secret', 70, 'HTTP 402: credential test-secret-long')
+      expect(duplicateContentFailure(db, 'post-dup', [])).toBeNull()
+      expect(duplicateContentFailure(db, 'post-mixed', [])).toBe('X publish failed: HTTP 403: Forbidden')
+      expect(duplicateContentFailure(db, 'post-secret', ['test-secret-long'])).toBe('X publish failed: HTTP 402: credential [redacted]')
+      expect(duplicateContentFailure(db, 'missing', [])).toBe('X publish failed: No stored error detail')
     } finally { db.close() }
   })
   it.each([[59, '94287082'], [1111111109, '07081804'], [1111111111, '14050471'], [1234567890, '89005924'], [2000000000, '69279037'], [20000000000, '65353130']])('matches RFC 6238 SHA-1 at %s', (seconds, expected) => {
@@ -59,5 +67,8 @@ describe('E2E helpers', () => {
     expect(findMailOtp(line, 0, mail)).toBe('3f0c2a3e-8a7b-4c1d-9e2f-1a2b3c4d5e6f')
     expect(findMailOtp(otherLine + line, 0, mail)).toBe('3f0c2a3e-8a7b-4c1d-9e2f-1a2b3c4d5e6f')
     expect(findMailOtp(otherLine + line, otherLine.length, 'different@example.invalid')).toBeNull()
+    const broken = `[LOCAL DEV] Mail login URL for ${mail}: not a url\n`
+    const valid = `[LOCAL DEV] Mail login URL for ${mail}: http://localhost:3000/mail-login?otp=3f0c2a3e-8a7b-4c1d-9e2f-1a2b3c4d5e6f\n`
+    expect(findMailOtp(broken + valid, 0, mail)).toBe('3f0c2a3e-8a7b-4c1d-9e2f-1a2b3c4d5e6f')
   })
 })

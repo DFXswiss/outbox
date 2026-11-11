@@ -37,37 +37,76 @@ function readEnvironment(path: string): { content: string; clientId: string; cli
   return { content, clientId, clientSecret, handle }
 }
 
-async function receiveBrowserCode(url: string, state: string, output: (line: string) => void): Promise<string> {
-  return new Promise((resolveCode, reject) => {
+function authorizationCallback(url: URL, expectedState: string): { status: number; body: string; stop: boolean; code?: string; error?: Error } {
+  if (url.pathname !== '/callback') return { status: 404, body: '', stop: false }
+  const received = url.searchParams.get('state') ?? ''
+  if (!validState(received, expectedState)) return { status: 400, body: 'Authorization failed.', stop: false }
+  const code = url.searchParams.get('code')
+  if (!code) return { status: 400, body: 'Authorization failed.', stop: true, error: new Error('Authorization failed.') }
+  return { status: 200, body: 'Authorization received. You can close this window.', stop: true, code }
+}
+
+export function startAuthorizationCallback(expectedState: string, port = 0): Promise<{ port: number; result: Promise<string>; close: () => Promise<void> }> {
+  return new Promise((resolveReady, rejectReady) => {
+    let settled = false
+    let ready = false
+    let settleResult: (error?: Error, code?: string) => void = () => {}
+    const result = new Promise<string>((resolveCode, reject) => {
+      settleResult = (error, code) => { if (error) reject(error); else resolveCode(code!) }
+    })
     const server = createServer((req, res) => {
       const callback = new URL(req.url ?? '/', REDIRECT)
-      if (callback.pathname !== '/callback') { res.writeHead(404); res.end(); return }
-      const received = callback.searchParams.get('state') ?? ''
-      if (!validState(received, state)) {
-        res.writeHead(400); res.end('Authorization failed.'); finish(new Error('Authorization state mismatch.')); return
-      }
-      const code = callback.searchParams.get('code')
-      if (!code) { res.writeHead(400); res.end('Authorization failed.'); finish(new Error('Authorization failed.')); return }
-      res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8' }); res.end('Authorization received. You can close this window.')
-      finish(undefined, code)
+      const outcome = authorizationCallback(callback, expectedState)
+      if (outcome.body) res.writeHead(outcome.status, { 'content-type': 'text/plain; charset=utf-8' })
+      else res.writeHead(outcome.status)
+      res.end(outcome.body, () => { if (outcome.stop) finish(outcome.error, outcome.code) })
     })
     const timer = setTimeout(() => finish(new Error('Authorization timed out.')), 300_000)
-    function finish(error?: Error, code?: string) {
-      clearTimeout(timer)
-      server.close()
-      if (error) reject(error)
-      else resolveCode(code!)
+    let closing: Promise<void> | undefined
+    function closeServer(): Promise<void> {
+      if (!closing) closing = new Promise((resolveClose) => {
+        if (!server.listening) { resolveClose(); return }
+        server.close(() => resolveClose())
+      })
+      return closing
     }
-    server.once('error', () => finish(new Error('Could not start the callback server.')))
-    server.listen(8765, '127.0.0.1', () => {
-      output(url)
-      if (process.platform === 'darwin') {
-        const child = spawn('open', [url], { stdio: 'ignore' })
-        child.on('error', () => {})
-        child.unref()
+    function finish(error?: Error, code?: string) {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      void closeServer()
+      settleResult(error, code)
+    }
+    server.once('error', () => {
+      const error = new Error('Could not start the callback server.')
+      if (!ready) {
+        settled = true
+        clearTimeout(timer)
+        result.catch(() => {})
+        settleResult(error)
+        rejectReady(error)
+        return
       }
+      finish(error)
+    })
+    server.listen(port, '127.0.0.1', () => {
+      ready = true
+      const address = server.address()
+      const actual = address && typeof address !== 'string' ? address.port : port
+      resolveReady({ port: actual, result, close: closeServer })
     })
   })
+}
+
+async function receiveBrowserCode(url: string, state: string, output: (line: string) => void): Promise<string> {
+  const session = await startAuthorizationCallback(state, 8765)
+  output(url)
+  if (process.platform === 'darwin') {
+    const child = spawn('open', [url], { stdio: 'ignore' })
+    child.on('error', () => {})
+    child.unref()
+  }
+  return session.result
 }
 
 export async function authorize(options: AuthorizeOptions): Promise<void> {
@@ -87,8 +126,12 @@ export async function authorize(options: AuthorizeOptions): Promise<void> {
     redirect: 'manual', signal: AbortSignal.timeout(30_000)
   })
   if (tokenResponse.status !== 200) throw new Error('X token exchange failed.')
-  const tokens = await tokenResponse.json() as { access_token?: unknown; refresh_token?: unknown }
+  const tokens = await tokenResponse.json() as { access_token?: unknown; refresh_token?: unknown; scope?: unknown }
   if (typeof tokens.access_token !== 'string' || !tokens.access_token || typeof tokens.refresh_token !== 'string' || !tokens.refresh_token || /[\r\n]/.test(tokens.refresh_token)) throw new Error('X returned an invalid token response.')
+  // Captured from a local X refresh response on 2026-11-10: token_type, expires_in, access_token, scope, refresh_token.
+  const granted = new Set(typeof tokens.scope === 'string' ? tokens.scope.split(' ').filter((item) => item !== '') : [])
+  const missing = SCOPES.split(' ').filter((item) => !granted.has(item))
+  if (missing.length > 0) throw new Error(`X did not grant: ${missing.join(' ')}`)
   const userResponse = await fetchImpl('https://api.x.com/2/users/me', { headers: { authorization: `Bearer ${tokens.access_token}` }, redirect: 'manual', signal: AbortSignal.timeout(30_000) })
   if (userResponse.status !== 200) throw new Error('X account lookup failed.')
   const user = await userResponse.json() as { data?: { username?: unknown } }

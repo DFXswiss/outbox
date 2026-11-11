@@ -11,6 +11,14 @@ export function redactKnownSecrets(value: string, secrets: Iterable<string>): st
   return result.replace(/[\r\n\t]+/g, ' ')
 }
 
+export function duplicateContentFailure(db: SqliteDatabase, postId: string, secrets: Iterable<string>): string | null {
+  const row = db.prepare(
+    'SELECT error FROM publish_results WHERE scheduledPostId = ? ORDER BY at DESC, rowid DESC LIMIT 1'
+  ).get(postId) as { error: string | null } | undefined
+  if (row?.error && /duplicate content/i.test(row.error)) return null
+  return unexpectedPostStatus(db, postId, 'failed', secrets)
+}
+
 export function unexpectedPostStatus(
   db: SqliteDatabase,
   postId: string,
@@ -71,7 +79,7 @@ export function findMailOtp(content: string, offset: number, mail: string): stri
     try {
       const value = new URL(line.slice(at + prefix.length).trim()).searchParams.get('otp')
       if (value && /^[0-9a-f-]{36}$/i.test(value)) return value
-    } catch { return null }
+    } catch { continue }
   }
   return null
 }
