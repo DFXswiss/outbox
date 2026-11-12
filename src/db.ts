@@ -103,7 +103,8 @@ export function openDatabase(filePath: string) {
   }
   const auditColumns = db.pragma('table_info(audit)') as Array<{ name: string }>
   if (!auditColumns.some((column) => column.name === 'actorKind')) {
-    db.exec('ALTER TABLE audit ADD COLUMN actorKind TEXT')
+    db.exec(`ALTER TABLE audit ADD COLUMN actorKind TEXT;
+UPDATE audit SET actorKind = CASE WHEN actorUser IS NULL AND actorAccount IS NULL THEN 'system' ELSE 'user' END`)
   }
   return db
 }

@@ -15,7 +15,8 @@ export function duplicateContentFailure(db: SqliteDatabase, postId: string, secr
   const row = db.prepare(
     'SELECT error FROM publish_results WHERE scheduledPostId = ? ORDER BY at DESC, rowid DESC LIMIT 1'
   ).get(postId) as { error: string | null } | undefined
-  if (row?.error && /duplicate content/i.test(row.error)) return null
+  const error = row?.error ?? ''
+  if (error.startsWith('HTTP 403: ') && error.includes('You are not allowed to create a Tweet with duplicate content.')) return null
   return unexpectedPostStatus(db, postId, 'failed', secrets)
 }
 

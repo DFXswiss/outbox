@@ -59,7 +59,8 @@ export function startAuthorizationCallback(expectedState: string, port = 0): Pro
       const outcome = authorizationCallback(callback, expectedState)
       if (outcome.body) res.writeHead(outcome.status, { 'content-type': 'text/plain; charset=utf-8' })
       else res.writeHead(outcome.status)
-      res.end(outcome.body, () => { if (outcome.stop) finish(outcome.error, outcome.code) })
+      res.end(outcome.body)
+      if (outcome.stop) finish(outcome.error, outcome.code)
     })
     const timer = setTimeout(() => finish(new Error('Authorization timed out.')), 300_000)
     let closing: Promise<void> | undefined
@@ -77,6 +78,13 @@ export function startAuthorizationCallback(expectedState: string, port = 0): Pro
       void closeServer()
       settleResult(error, code)
     }
+    function close(): Promise<void> {
+      if (!settled) {
+        result.catch(() => {})
+        finish(new Error('Authorization cancelled.'))
+      }
+      return closeServer()
+    }
     server.once('error', () => {
       const error = new Error('Could not start the callback server.')
       if (!ready) {
@@ -93,7 +101,7 @@ export function startAuthorizationCallback(expectedState: string, port = 0): Pro
       ready = true
       const address = server.address()
       const actual = address && typeof address !== 'string' ? address.port : port
-      resolveReady({ port: actual, result, close: closeServer })
+      resolveReady({ port: actual, result, close })
     })
   })
 }

@@ -37,12 +37,12 @@ const SIGN_MESSAGE = {
   blockchains: ['Ethereum', 'Sepolia', 'BinanceSmartChain', 'Arbitrum', 'Optimism', 'Polygon', 'Base', 'Gnosis', 'Plasma', 'Haqq', 'Citrea', 'CitreaTestnet']
 }
 
-// Captured from a locally running DFX API (ENVIRONMENT=loc) on 2026-11-10
-// secret replaced
+// Captured from a locally running DFX API (ENVIRONMENT=loc) on 2026-11-10.
+// Label set to the handbook mail composer@example.com; secret replaced by a 32-character placeholder.
 const TOTP_SETUP = {
   type: 'App',
   secret: 'JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP',
-  uri: 'otpauth://totp/DFX.swiss%3Aexample.com?secret=JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP&issuer=DFX.swiss'
+  uri: 'otpauth://totp/DFX.swiss%3Acomposer%40example.com?secret=JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP&issuer=DFX.swiss'
 }
 
 // Captured from a locally running DFX API (ENVIRONMENT=loc) on 2026-11-10
@@ -371,7 +371,7 @@ describe('mail login', () => {
     const cookie = callback.headers.get('set-cookie')!.split(';')[0]!
     const page = await call(h.port, '/auth/tfa', { headers: { cookie } })
     expect(page.text).toContain(TOTP_SETUP.secret)
-    expect(page.text).toContain('otpauth://totp/DFX.swiss%3Aexample.com?secret=JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP&amp;issuer=DFX.swiss')
+    expect(page.text).toContain('otpauth://totp/DFX.swiss%3Acomposer%40example.com?secret=JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP&amp;issuer=DFX.swiss')
     expect(page.text).not.toContain(token)
     expect(calls.filter((item) => item.url.endsWith('/v1/auth/2fa?level=Strict')).map((item) => item.init?.method)).toEqual(['POST'])
     const verified = await call(h.port, '/auth/tfa', { method: 'POST', headers: { cookie, 'content-type': 'application/x-www-form-urlencoded' }, body: 'code=123456' })

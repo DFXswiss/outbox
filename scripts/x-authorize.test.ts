@@ -2,10 +2,10 @@ import { createHash } from 'node:crypto'
 import { chmodSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { authorize, startAuthorizationCallback, validState } from './x-authorize'
 
-// Captured from a local X refresh response on 2026-11-10
+// Form, token_type, expires_in and scope from a real X refresh response on 2026-11-10; access_token and refresh_token are placeholders because real tokens do not belong in the repository.
 const TOKEN_RESPONSE = {
   token_type: 'bearer',
   expires_in: 7200,
@@ -97,6 +97,33 @@ describe('X authorization', () => {
       await expect(session.result).resolves.toBe('granted-code')
     } finally {
       await session.close()
+    }
+  })
+
+  it('cancels an open authorization before any callback', async () => {
+    const unhandled: unknown[] = []
+    const onUnhandled = (reason: unknown) => { unhandled.push(reason) }
+    process.on('unhandledRejection', onUnhandled)
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    try {
+      const session = await startAuthorizationCallback('expected-state')
+      try {
+        const pending = session.result
+        const timers = vi.getTimerCount()
+        expect(timers).toBeGreaterThan(0)
+        await session.close()
+        await new Promise((resolve) => setImmediate(resolve))
+        expect(unhandled).toEqual([])
+        await expect(pending).rejects.toThrow('Authorization cancelled.')
+        expect(vi.getTimerCount()).toBe(timers - 1)
+        vi.useRealTimers()
+        await expect(fetch(`http://127.0.0.1:${session.port}/callback?state=expected-state&code=later`)).rejects.toThrow()
+      } finally {
+        await session.close()
+      }
+    } finally {
+      vi.useRealTimers()
+      process.off('unhandledRejection', onUnhandled)
     }
   })
 })

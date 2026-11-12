@@ -72,20 +72,21 @@ describe('audit actor migration', () => {
       actorAccount INTEGER,
       reason TEXT
     )`)
+    const insert = oldDb.prepare('INSERT INTO audit (id, at, event, actorUser, actorAccount) VALUES (?, ?, ?, ?, ?)')
+    insert.run('legacy-system', 1, 'published', null, null)
+    insert.run('legacy-user', 2, 'published', 17, 23)
     oldDb.close()
 
+    const legacy = [
+      { id: 'legacy-system', actorKind: 'system', actorUser: null, actorAccount: null },
+      { id: 'legacy-user', actorKind: 'user', actorUser: 17, actorAccount: 23 }
+    ]
     const migrated = openDatabase(file)
-    const event = { at: 1, event: 'published' as const, bundleId: null, entryId: null, reason: null }
-    writeAudit(migrated, { ...event, actorUser: null, actorAccount: null })
-    expect(migrated.prepare('SELECT actorKind, actorUser, actorAccount FROM audit').get()).toEqual({ actorKind: 'system', actorUser: null, actorAccount: null })
+    expect(migrated.prepare('SELECT id, actorKind, actorUser, actorAccount FROM audit ORDER BY at').all()).toEqual(legacy)
     migrated.close()
 
     const reopened = openDatabase(file)
-    writeAudit(reopened, { ...event, at: 2, actorUser: 17, actorAccount: 23 })
-    expect(reopened.prepare('SELECT actorKind, actorUser, actorAccount FROM audit ORDER BY at').all()).toEqual([
-      { actorKind: 'system', actorUser: null, actorAccount: null },
-      { actorKind: 'user', actorUser: 17, actorAccount: 23 }
-    ])
+    expect(reopened.prepare('SELECT id, actorKind, actorUser, actorAccount FROM audit ORDER BY at').all()).toEqual(legacy)
     reopened.close()
   })
 })

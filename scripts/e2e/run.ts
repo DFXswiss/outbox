@@ -50,10 +50,10 @@ function git(args: string[], cwd: string): string {
   return result.stdout.trim()
 }
 function record(name: string, result: Result, detail: string): void { stations.push({ name, result, detail }) }
-async function station(name: string, work: () => Promise<void>): Promise<void> {
+async function station(name: string, work: () => Promise<void | string>): Promise<void> {
   active = name
-  await work()
-  record(name, 'pass', 'Completed')
+  const detail = await work()
+  record(name, 'pass', typeof detail === 'string' ? detail : 'Completed')
 }
 function jsonResponse(response: Response): Promise<Record<string, any>> { return response.json() as Promise<Record<string, any>> }
 async function http(url: string, expected: number, init: RequestInit = {}): Promise<Response> {
@@ -367,15 +367,21 @@ async function main(): Promise<void> {
     check(first?.channel?.url && duplicate.channel, 'Retry prerequisites missing')
     const duplicatePostId = duplicate.channel.postId
     const db = new Database(dbPath, { readonly: true, fileMustExist: true })
+    let storedError = ''
     try {
       const rejection = duplicateContentFailure(db, duplicatePostId, secrets)
       if (rejection) fail(rejection)
+      const stored = db.prepare(
+        'SELECT error FROM publish_results WHERE scheduledPostId = ? ORDER BY at DESC, rowid DESC LIMIT 1'
+      ).get(duplicatePostId) as { error: string | null } | undefined
+      storedError = stored?.error ?? ''
     } finally { db.close() }
     await deleteTweet(first.channel.url.split('/').at(-1)!)
     await postJson(`/api/posts/${duplicate.channel.postId}/retry`, adminCookie, {})
     const retried = await waitStatus(ids[2]!, 'sent', Date.now() + 120_000)
     check(retried.channel?.url, 'Retried post URL missing')
     await inspectPublic(retried.channel.url)
+    return `X rejected the duplicate: ${redactKnownSecrets(storedError, secrets)}`
   })
   await station('resolve uncertain', async () => {
     const uncertain = await waitStatus(ids[3]!, 'uncertain', dSlot.epoch + 120_000)

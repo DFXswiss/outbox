@@ -21,11 +21,18 @@ describe('E2E helpers', () => {
         .toBe('X publish failed: HTTP 402: Payment Required: credits depleted; credential [redacted]')
       expect(unexpectedPostStatus(db, 'post-2', 'uncertain', [])).toBe('X publish uncertain: Other post error')
       expect(unexpectedPostStatus(db, 'missing', 'failed', [])).toBe('X publish failed: No stored error detail')
-      insert.run('dup', 'post-dup', 40, 'Duplicate Content')
-      insert.run('older-dup', 'post-mixed', 50, 'duplicate content')
+      // Captured from the real X API, stored by Outbox in a real end-to-end run on 2026-11-12
+      insert.run('dup', 'post-dup', 40, 'HTTP 403: Forbidden: You are not allowed to create a Tweet with duplicate content.')
+      // Constructed: HTTP 403 whose detail only contains the words "duplicate content", not the captured sentence.
+      insert.run('partial', 'post-partial', 45, 'HTTP 403: Forbidden: request flagged as duplicate content spam by policy')
+      // Constructed: the captured sentence, but status HTTP 400 instead of HTTP 403.
+      insert.run('other-status', 'post-status', 48, 'HTTP 400: Bad Request: You are not allowed to create a Tweet with duplicate content.')
+      insert.run('older-dup', 'post-mixed', 50, 'HTTP 403: Forbidden: You are not allowed to create a Tweet with duplicate content.')
       insert.run('newer-other', 'post-mixed', 60, 'HTTP 403: Forbidden')
       insert.run('secret', 'post-secret', 70, 'HTTP 402: credential test-secret-long')
       expect(duplicateContentFailure(db, 'post-dup', [])).toBeNull()
+      expect(duplicateContentFailure(db, 'post-partial', [])).toBe('X publish failed: HTTP 403: Forbidden: request flagged as duplicate content spam by policy')
+      expect(duplicateContentFailure(db, 'post-status', [])).toBe('X publish failed: HTTP 400: Bad Request: You are not allowed to create a Tweet with duplicate content.')
       expect(duplicateContentFailure(db, 'post-mixed', [])).toBe('X publish failed: HTTP 403: Forbidden')
       expect(duplicateContentFailure(db, 'post-secret', ['test-secret-long'])).toBe('X publish failed: HTTP 402: credential [redacted]')
       expect(duplicateContentFailure(db, 'missing', [])).toBe('X publish failed: No stored error detail')
