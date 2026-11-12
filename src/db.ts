@@ -102,9 +102,13 @@ export function openDatabase(filePath: string) {
     db.exec('ALTER TABLE entries ADD COLUMN decisionComment TEXT')
   }
   const auditColumns = db.pragma('table_info(audit)') as Array<{ name: string }>
-  if (!auditColumns.some((column) => column.name === 'actorKind')) {
-    db.exec(`ALTER TABLE audit ADD COLUMN actorKind TEXT;
-UPDATE audit SET actorKind = CASE WHEN actorUser IS NULL AND actorAccount IS NULL THEN 'system' ELSE 'user' END`)
+  const hasActorKind = auditColumns.some((column) => column.name === 'actorKind')
+  const actorKindGap = !hasActorKind || db.prepare('SELECT 1 FROM audit WHERE actorKind IS NULL LIMIT 1').get() !== undefined
+  if (actorKindGap) {
+    db.transaction(() => {
+      if (!hasActorKind) db.exec('ALTER TABLE audit ADD COLUMN actorKind TEXT')
+      db.exec(`UPDATE audit SET actorKind = CASE WHEN actorUser IS NULL AND actorAccount IS NULL THEN 'system' ELSE 'user' END WHERE actorKind IS NULL`)
+    }).immediate()
   }
   return db
 }

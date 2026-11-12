@@ -89,4 +89,38 @@ describe('audit actor migration', () => {
     expect(reopened.prepare('SELECT id, actorKind, actorUser, actorAccount FROM audit ORDER BY at').all()).toEqual(legacy)
     reopened.close()
   })
+
+  it('fills null actorKind when the column was added without a backfill', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'partial-audit-'))
+    tempDirs.push(dir)
+    const file = join(dir, 'state.sqlite')
+    const oldDb = new Database(file)
+    oldDb.exec(`CREATE TABLE audit (
+      id TEXT PRIMARY KEY,
+      at INTEGER NOT NULL,
+      event TEXT NOT NULL,
+      bundleId TEXT,
+      entryId TEXT,
+      actorUser INTEGER,
+      actorAccount INTEGER,
+      reason TEXT,
+      actorKind TEXT
+    )`)
+    const insert = oldDb.prepare('INSERT INTO audit (id, at, event, actorUser, actorAccount, actorKind) VALUES (?, ?, ?, ?, ?, NULL)')
+    insert.run('partial-system', 1, 'published', null, null)
+    insert.run('partial-user', 2, 'published', 17, 23)
+    oldDb.close()
+
+    const filled = [
+      { id: 'partial-system', actorKind: 'system', actorUser: null, actorAccount: null },
+      { id: 'partial-user', actorKind: 'user', actorUser: 17, actorAccount: 23 }
+    ]
+    const migrated = openDatabase(file)
+    expect(migrated.prepare('SELECT id, actorKind, actorUser, actorAccount FROM audit ORDER BY at').all()).toEqual(filled)
+    migrated.close()
+
+    const reopened = openDatabase(file)
+    expect(reopened.prepare('SELECT id, actorKind, actorUser, actorAccount FROM audit ORDER BY at').all()).toEqual(filled)
+    reopened.close()
+  })
 })
