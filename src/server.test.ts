@@ -57,6 +57,9 @@ const TFA_CONFLICT = { statusCode: 409, message: '2FA already set up', error: 'C
 // Captured from a locally running DFX API (ENVIRONMENT=loc) on 2026-11-10
 const INTROSPECT_OUTBOX = { user: 16, account: 16, role: 'Outbox' }
 
+// Captured from a locally running DFX API (ENVIRONMENT=loc) on 2026-11-10, response 201 {"accessToken":"<JWT>"}. accessToken replaced by the token local introspection in this test accepts.
+const SIGN_IN = { accessToken: TOKEN_ADMIN }
+
 const PEOPLE: Record<string, Identity> = {
   [TOKEN_A]: { user: 1, account: 1, role: 'OUTBOX' },
   [TOKEN_B]: { user: 2, account: 2, role: 'OUTBOX' },
@@ -438,8 +441,7 @@ describe('wallet and API login', () => {
         const url = String(input)
         if (url.includes('/signMessage')) return Response.json(SIGN_MESSAGE)
         expect(JSON.parse(String(init?.body))).toEqual({ address: WALLET_ADDRESS, signature: 'signed' })
-        // The captured accessToken was a JWT. This stand-in is the token local introspection accepts.
-        return Response.json({ accessToken: TOKEN_ADMIN }, { status: 201 })
+        return Response.json(SIGN_IN, { status: 201 })
       },
       introspect: async (token, role) => {
         roles.push(role)
@@ -460,7 +462,7 @@ describe('wallet and API login', () => {
   it('does not set a cookie when admin introspection refuses the wallet', async () => {
     const roles: string[] = []
     const h = await start({
-      fetch: async () => Response.json({ accessToken: TOKEN_ADMIN }, { status: 201 }),
+      fetch: async () => Response.json(SIGN_IN, { status: 201 }),
       introspect: async (_token, role) => {
         roles.push(role)
         return { ok: false, status: 403 }
@@ -474,7 +476,7 @@ describe('wallet and API login', () => {
   })
 
   it('rejects a foreign or missing origin before wallet or callback can set a cookie', async () => {
-    const h = await start({ fetch: async () => Response.json({ accessToken: TOKEN_ADMIN }, { status: 201 }) })
+    const h = await start({ fetch: async () => Response.json(SIGN_IN, { status: 201 }) })
     const walletBody = JSON.stringify({ address: WALLET_ADDRESS, signature: 'signed' })
     const callbackBody = JSON.stringify({ accessToken: TOKEN_ADMIN })
     for (const origin of ['https://attacker.invalid', null] as const) {
@@ -498,6 +500,40 @@ describe('wallet and API login', () => {
     const result = await call(h.port, '/auth/callback', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ accessToken: TOKEN_A }) })
     expect(result.json).toEqual({ ok: true })
     expect(roles).toEqual(['ADMIN', 'OUTBOX'])
+  })
+})
+
+describe('POST authentication messages', () => {
+  it('says sign-in is required for an anonymous post and not allowed for the wrong role', async () => {
+    const h = await start()
+    const html = await call(h.port, '/api/submit', {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      body: 'text=Fixture'
+    })
+    expect(html.status).toBe(401)
+    expect(html.text).toContain('Sign in required.')
+    expect(html.text).not.toContain('Not allowed.')
+    const json = await call(h.port, '/api/submit', { method: 'POST', body: '{}' })
+    expect(json.status).toBe(401)
+    expect(json.json).toEqual({ ok: false, reason: 'auth-failed', detail: 'Sign in required.' })
+    const deniedHtml = await call(h.port, '/review/missing/decide', {
+      method: 'POST',
+      token: TOKEN_A,
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      body: 'decision=reject'
+    })
+    expect(deniedHtml.status).toBe(403)
+    expect(deniedHtml.text).toContain('Not allowed.')
+    expect(deniedHtml.text).not.toContain('Sign in required.')
+    const deniedJson = await call(h.port, '/api/posts/missing/retry', {
+      method: 'POST',
+      token: TOKEN_A,
+      headers: { 'content-type': 'application/json' },
+      body: '{}'
+    })
+    expect(deniedJson.status).toBe(403)
+    expect(deniedJson.json).toEqual({ ok: false, reason: 'auth-failed', detail: 'Not allowed.' })
   })
 })
 

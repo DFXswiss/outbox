@@ -11,8 +11,16 @@ if (!loaded.ok) {
 }
 
 const config = loaded.config
-const db = openDatabase(config.dbPath)
 const log = (line: string) => process.stdout.write(`${line}\n`)
+const db = (() => {
+  try {
+    return openDatabase(config.dbPath)
+  } catch (error: unknown) {
+    const detail = error instanceof Error ? error.message : 'unknown error'
+    log(detail)
+    process.exit(1)
+  }
+})()
 if (config.xRefreshToken) {
   seedCredentials(db, config.xRefreshToken)
 }

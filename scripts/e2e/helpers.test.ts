@@ -2,7 +2,7 @@ import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
-import { duplicateContentFailure, findMailOtp, saveRefreshToken, scheduledSlot, totp, unexpectedPostStatus } from './helpers'
+import { duplicateContentFailure, findMailOtp, preserveDatabaseFiles, saveRefreshToken, scheduledSlot, totp, unexpectedPostStatus } from './helpers'
 import { parseZurichDateTime } from '../../src/time'
 import { openDatabase } from '../../src/db'
 
@@ -64,8 +64,35 @@ describe('E2E helpers', () => {
     expect(parseZurichDateTime(slot.local)).toBe(slot.epoch)
   })
 
+  it('copies the database outside the source directory and leaves the source unchanged', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'outbox-e2e-src-'))
+    let kept = ''
+    try {
+      const dbPath = join(dir, 'outbox.sqlite')
+      const files = {
+        '': Buffer.from('sqlite-main'),
+        '-wal': Buffer.from('sqlite-wal'),
+        '-shm': Buffer.from('sqlite-shm')
+      }
+      for (const [suffix, bytes] of Object.entries(files)) writeFileSync(`${dbPath}${suffix}`, bytes, { mode: 0o600 })
+      const before = Object.fromEntries(Object.keys(files).map((suffix) => [suffix, readFileSync(`${dbPath}${suffix}`)]))
+      kept = preserveDatabaseFiles(dbPath)
+      expect(kept === dir || kept.startsWith(`${dir}/`)).toBe(false)
+      expect(statSync(kept).mode & 0o777).toBe(0o700)
+      for (const suffix of ['', '-wal', '-shm']) {
+        const copied = join(kept, `outbox.sqlite${suffix}`)
+        expect(readFileSync(copied)).toEqual(before[suffix])
+        expect(statSync(copied).mode & 0o777).toBe(0o600)
+        expect(readFileSync(`${dbPath}${suffix}`)).toEqual(before[suffix])
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+      if (kept) rmSync(kept, { recursive: true, force: true })
+    }
+  })
+
   it('finds the requested OTP in colored backend logs after the given offset', () => {
-    // Captured from the log of a locally running DFX API (ENVIRONMENT=loc) on 2026-11-09
+    // Form and text of the line come from the log of a locally running DFX API (ENVIRONMENT=loc) on 2026-11-09. The OTP is replaced by a placeholder.
     const line = '\x1b[32m[Nest] 63657  - \x1b[39m09.11.2026, 13:25:04 \x1b[32m    LOG\x1b[39m \x1b[38;5;3m[AuthService] \x1b[39m\x1b[32m[LOCAL DEV] Mail login URL for outbox-e2e-a82cb24a5355e49c@example.invalid: http://localhost:3000/mail-login?otp=3f0c2a3e-8a7b-4c1d-9e2f-1a2b3c4d5e6f\x1b[39m\n'
     const mail = 'outbox-e2e-a82cb24a5355e49c@example.invalid'
     const otherLine = line.replace(mail, 'different@example.invalid').replace('3f0c2a3e-8a7b-4c1d-9e2f-1a2b3c4d5e6f', '12345678-1234-1234-1234-123456789abc')

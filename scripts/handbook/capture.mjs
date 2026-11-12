@@ -251,9 +251,11 @@ const stateButtonPolicy = {
   '05-posts/04-empty-approver': []
 }
 
-async function capture(page, group, name, expected, { write = true } = {}) {
+async function capture(page, group, name, expected, { write = true, absent = [] } = {}) {
   const content = await page.locator('body').innerText()
-  for (const text of expected) if (!content.toLowerCase().includes(text.toLowerCase())) fail(`${group}/${name}: expected page text ${JSON.stringify(text)}; got ${JSON.stringify(content)}`)
+  const folded = content.toLowerCase()
+  for (const text of expected) if (!folded.includes(text.toLowerCase())) fail(`${group}/${name}: expected page text ${JSON.stringify(text)}; got ${JSON.stringify(content)}`)
+  for (const text of absent) if (folded.includes(text.toLowerCase())) fail(`${group}/${name}: page text must not include ${JSON.stringify(text)}; got ${JSON.stringify(content)}`)
   const allowed = new Set(stateButtonPolicy[`${group}/${name}`] ?? [])
   for (const label of allDecisionButtons) {
     const count = await page.getByRole('button', { name: label, exact: true }).count()
@@ -447,7 +449,7 @@ async function captureStaticErrors(composer, approver) {
   await page.goto(`http://127.0.0.1:${appPort}/`)
   await page.evaluate(() => { document.cookie = 'outbox=invalid; path=/' })
   await resultFromRealResponse(page, 'POST', '/api/submit', { unauthenticated: true, body: 'text=Fixture', expectedStatus: 401 })
-  await capture(page, '04-results-and-errors', '06-sign-in-required', ['Sign in required'])
+  await capture(page, '04-results-and-errors', '06-sign-in-required', ['Sign in required.'])
 
   await resultFromRealResponse(page, 'POST', '/api/submit', { role: 'OUTBOX', body: 'text=Fixture&scheduledAt=2030-01-01T10%3A00' , cookie: `outbox=${encodeURIComponent(jwt('OUTBOX'))}`, origin: 'https://example.invalid', expectedStatus: 403 })
   await capture(page, '04-results-and-errors', '07-forbidden-origin', ['Forbidden', 'Origin does not match this host.'])
@@ -521,7 +523,7 @@ async function main() {
   await capture(emptyAuthorPosts, '05-posts', '03-empty-author', ['Posts', 'No posts yet.', 'Write a post'])
   const emptyApproverPosts = await approver.context.newPage()
   await emptyApproverPosts.goto(`http://127.0.0.1:${appPort}/posts`)
-  await capture(emptyApproverPosts, '05-posts', '04-empty-approver', ['Posts', 'No posts yet.'])
+  await capture(emptyApproverPosts, '05-posts', '04-empty-approver', ['Posts', 'No posts yet.'], { absent: ['Write a post'] })
 
   const clearDraft = 'The service update is ready for a careful review.'
   const clearReview = composer.page.waitForResponse((response) => response.url().endsWith('/api/review') && response.request().method() === 'POST')
@@ -587,7 +589,8 @@ async function main() {
     'No blocking findings.'
   ])
 
-  const clear = await submit(composer, 'A short update is scheduled after tomorrow’s review.')
+  const firstAuthorText = 'A short update is scheduled after tomorrow’s review.'
+  const clear = await submit(composer, firstAuthorText)
   const clearApprover = await reviewPage(approver.context, clear.bundleId)
   await capture(clearApprover, '02-review-approver', '01-submitted-clear', ['submitted', 'Approve', 'Reject', 'No blocking findings.', 'Comment for the author (optional)'])
   await capture(await reviewPage(composer.context, clear.bundleId), '03-review-author', '01-submitted-clear', ['submitted', 'No blocking findings.'])
@@ -656,13 +659,17 @@ async function main() {
   const failedAdmin = await reviewPage(approver.context, failed.bundleId)
   await capture(failedAdmin, '02-review-approver', '07-failed', ['failed', 'Retry'])
   await capture(await reviewPage(composer.context, failed.bundleId), '03-review-author', '07-failed', ['failed'])
+  const otherAuthorText = 'A separate author update for the approver list.'
+  const secondAuthor = await context('OUTBOX', 3)
+  const otherAuthorPost = await submit(secondAuthor, otherAuthorText)
+  if (!otherAuthorPost.bundleId) fail('Second author submission did not open its review page')
   const authorPosts = await composer.context.newPage()
   await authorPosts.goto(`http://127.0.0.1:${appPort}/posts`)
   await capture(authorPosts, '05-posts', '01-author-list', [
     'Posts', 'Waiting for approval.', 'Approved. Goes out at the scheduled time.',
     'Published on X.', 'Sending failed. An approver can retry.', 'Rejected by an approver.',
     'Image attached', 'View on X'
-  ])
+  ], { absent: [otherAuthorText] })
   await Promise.all([failedAdmin.waitForNavigation(), failedAdmin.locator('button').filter({ hasText: 'Retry' }).click()])
   await capture(failedAdmin, '04-results-and-errors', '03-retry-result', ['Post updated', 'pending'])
 
@@ -697,13 +704,10 @@ async function main() {
   app = originalApp
   appPort = originalAppPort
 
-  const secondAuthor = await context('OUTBOX', 3)
-  const otherAuthorPost = await submit(secondAuthor, 'A separate author update for the approver list.')
-  if (!otherAuthorPost.bundleId) fail('Second author submission did not open its review page')
   const approverPosts = await approver.context.newPage()
   await approverPosts.goto(`http://127.0.0.1:${appPort}/posts`)
   await capture(approverPosts, '05-posts', '02-approver-list', [
-    'Posts', 'A separate author update for the approver list.', 'Open'
+    'Posts', otherAuthorText, firstAuthorText, 'Open'
   ])
 
   await captureStaticErrors(composer, approver)

@@ -47,7 +47,7 @@ describe('X transport proxy', () => {
       for await (const chunk of req) chunks.push(Buffer.from(chunk))
       expect(Buffer.concat(chunks).toString()).toBe('{"text":"marker"}')
       calls += 1
-      // Shape: https://docs.x.com/x-api/posts/create-post
+      // Form: https://docs.x.com/x-api/posts/create-post. id from a real run on 2026-11-10; text replaced by marker.
       const body = compress(Buffer.from('{"data":{"id":"2120178475663233374","text":"marker"}}'))
       res.writeHead(201, { 'content-type': 'application/json', 'content-encoding': encoding, 'content-length': body.length })
       res.end(body)

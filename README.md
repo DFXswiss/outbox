@@ -55,8 +55,8 @@ Browser/SSR uses the cookie. Outbox always sends `Authorization: Bearer` to the 
 
 **Checks inside Outbox**
 
-- Verify HS256 with the **same JWT secret** as the DFX API. Mail-elevated staff tokens include `address`. Account tokens do not; they are not enough. Copy the default JWT validate branch (`address && user && account`). Outbox users need a wallet, like Support.
-- `hasRoleAccess(entryRole, payload.role)` with the DFX hierarchy. Compose/submit/retract: `OUTBOX` (retract also `authoredBy`; Outbox introspect). Decide/retry/resolve: `ADMIN` (Admin introspect). Retract is **not** Admin-only. Admin/SuperAdmin may compose via additionalRoles.
+- Verify HS256 with the **same JWT secret** as the DFX API. Mail-elevated staff tokens include `address`. Account tokens do not; they are not enough. A token is accepted only when `address` is a non-empty string, `user` and `account` are positive integers, and `exp` is a number that has not expired. Outbox users need a wallet, like Support.
+- Only the roles `Outbox`, `Admin`, and `SuperAdmin` are accepted. `Outbox` maps to `OUTBOX`; `Admin` and `SuperAdmin` map to `ADMIN`. `hasRoleAccess` receives that mapped role. Compose/submit/retract: `OUTBOX` (retract also `authoredBy`; Outbox introspect). Decide/retry/resolve: `ADMIN` (Admin introspect). Retract is **not** Admin-only. Admin/SuperAdmin may compose via additionalRoles.
 - Audit uses JWT `user` and `account`, never a typed email.
 - Introspect **every** authenticated route (HTML GET, API, mutations).
   - `GET /v1/auth/introspect/outbox`: `RoleGuard(OUTBOX)` (Admin via additionalRoles). If `payload.role === 'Outbox'`: mail-origin claim `tfaRequired` **and** the DFX TFA interceptor must have passed (completed TOTP). Wallet-Outbox tokens → 403. A pre-verify magic-link JWT still carries the claim but introspect stays 403 until `2fa/verify`. Admin/SuperAdmin on this route without that claim is allowed.
@@ -178,7 +178,7 @@ Channel status: `pending | in-flight | sent | failed | uncertain`. `PublishResul
 
 Phase 1: **one** brand, X only: **21 gifts**. The brand slug is configuration (`BRAND`), the pack lives at `content/<brand>/` **in the image**. `rules.json` is not part of this repository; the build adds it from a private source. Missing `rules.json` → submit 409 and health `ok: false`.
 
-Blocking: forbidden claims, MiCAR-unsafe wording, and provisional parameters without a qualifier. No LLM. Pack updates = new image.
+Blocking: forbidden claims, MiCAR-unsafe wording, provisional parameters without a qualifier, and text over `X_MAX_WEIGHTED_LENGTH` (weighted length as X defines it). No LLM. Pack updates = new image.
 
 ---
 
@@ -190,7 +190,7 @@ Blocking: forbidden claims, MiCAR-unsafe wording, and provisional parameters wit
 { "ok": bool, "queueRunning": bool, "probes": { "x": "ok"|"bad", "jwt": "ok"|"bad" } }
 ```
 
-`ok` is true only when every probe is ok. `x=bad`: no successful users/me probe yet (also while the service starts), the probe failed or the handle does not match, or a refresh needed a new login. `jwt=bad` only when the JWT secret is unset (not a drift detector).
+`ok` is true only when every probe is ok. `x=bad`: no successful users/me probe yet (also while the service starts), the probe failed or the handle does not match, a refresh needed a new login, or a rate limit reported by X has not expired (`x-rate-limit-reset`). While that rate limit has not expired, no further post is claimed. `jwt=bad` only when the JWT secret is unset (not a drift detector).
 
 | Route | Role | Effect |
 |---|---|---|
@@ -233,6 +233,8 @@ Environment variables, read once at start. A missing or invalid required variabl
 | `X_HANDLE` | yes | — | Account the boot probe expects (leading `@` optional) |
 | `X_MAX_WEIGHTED_LENGTH` | no | `25000` | Maximum X weighted length; set to `280` for accounts without Premium |
 | `X_API_BASE` | no | `https://api.x.com` | X API base |
+
+A database file from an unreleased earlier version is rejected. Start with a new database file.
 
 **Refresh token.** X refresh tokens are treated as single-use: every refresh stores the new pair in `x_credentials` before the access token is used. `X_REFRESH_TOKEN` only seeds that row. The same value on a later start changes nothing; a **different** value replaces the stored token. After a lost rotation (`needs-login` alert), authorize again, set the new refresh token, and restart.
 
@@ -310,7 +312,7 @@ The operator handbook covers the composer, review states, and service responses.
 
 | PR | What |
 |---|---|
-| DFX API B1 | `UserRole.OUTBOX` in enum, `StaffRoles`, `KycGatedRoles`, `additionalRoles`, redirect allowlist for Outbox callback and tfa-complete |
+| DFX API B1 | `UserRole.OUTBOX` in enum, `StaffRoles`, `KycGatedRoles`, `additionalRoles`, redirect allowlist for the mail callback (`OUTBOX_PUBLIC_URL` + `/auth/callback`) |
 | DFX API B2 | `GET /v1/auth/introspect/outbox` and `/admin` |
 | A1 | Scaffold, `content/dfx/`, review engine, status types, CI |
 | A2 | SSR composer, cookie/Bearer = DFX JWT, submit/approve, **no** publish-now |

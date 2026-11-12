@@ -387,7 +387,8 @@ export function createXClient(options: XClientOptions) {
           if (state === 'succeeded') break
           if (state === 'failed') return { result: { channel: 'x', ok: false, error: 'X media processing failed.' }, needsLogin: false }
           if (state !== 'pending' && state !== 'in_progress') return { result: { channel: 'x', ok: false, error: 'Invalid X media processing state.' }, needsLogin: false }
-          const waitMs = Math.max(0, typeof info.check_after_secs === 'number' ? info.check_after_secs * 1000 : 1000)
+          const requestedMs = typeof info.check_after_secs === 'number' ? info.check_after_secs * 1000 : Number.NaN
+          const waitMs = Number.isFinite(requestedMs) && requestedMs >= 1000 ? requestedMs : 1000
           if (now() + waitMs >= deadlineMs) return { result: { channel: 'x', ok: false, error: 'Request deadline exceeded' }, needsLogin: false }
           await new Promise((resolve) => setTimeout(resolve, waitMs))
           const statusRequest = async (): Promise<Response> => request(

@@ -737,7 +737,7 @@ export function createOutboxServer(deps: OutboxServerDeps): Server {
     const auth = await authenticate(req, neededRole)
     if (!auth.ok) {
       await readBody(req)
-      fail(res, req, pathname, auth.status, 'auth-failed', 'Not allowed.')
+      fail(res, req, pathname, auth.status, 'auth-failed', auth.status === 401 ? 'Sign in required.' : 'Not allowed.')
       return
     }
     if (auth.via === 'cookie' && !originMatchesHost(req)) {

@@ -94,6 +94,29 @@ describe('X publisher client', () => {
     expect(tweets).toBe(succeeds ? 1 : 0)
   })
 
+  it('waits at least one second between media status checks when X asks for no delay', async () => {
+    const statusAt: number[] = []
+    const x = client(async (input) => {
+      const url = String(input)
+      // Shape: https://docs.x.com/x-api/media/upload-media
+      if (url.endsWith('/2/media/upload')) return json({ data: { id: '1880028106020515840', processing_info: { state: 'pending', check_after_secs: 0 } } })
+      if (url.includes('?command=STATUS')) {
+        statusAt.push(Date.now())
+        const pending = statusAt.length < 3
+        // Shape: https://docs.x.com/x-api/media/get-media-upload-status
+        // check_after_secs 0 is the boundary under test, not a captured delay.
+        return json({ data: { id: '1880028106020515840', processing_info: pending ? { state: 'pending', check_after_secs: 0 } : { state: 'succeeded' } } })
+      }
+      // Shape: https://docs.x.com/x-api/posts/create-post
+      return json({ data: { id: '123', text: 'hello' } }, 201)
+    })
+    const result = await x.postTweet('hello', NOW + 90_000, Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))
+    expect(result.result.ok).toBe(true)
+    expect(statusAt).toHaveLength(3)
+    expect(statusAt[1]! - statusAt[0]!).toBeGreaterThanOrEqual(1000)
+    expect(statusAt[2]! - statusAt[1]!).toBeGreaterThanOrEqual(1000)
+  })
+
   it('includes top-level X error code and message while redacting credentials', async () => {
     // Shape: https://docs.x.com/x-api/fundamentals/response-codes-and-errors
     const x = client(async () => json({ code: 88, message: 'Rejected test-access-token' }, 429))

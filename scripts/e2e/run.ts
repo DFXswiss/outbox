@@ -7,13 +7,30 @@ import { createRequire } from 'node:module'
 import { deflateSync } from 'node:zlib'
 import Database from 'better-sqlite3'
 import { HDNodeWallet, Wallet } from 'ethers'
-import { duplicateContentFailure, findMailOtp, parseEnv, readPrivateEnv, redactKnownSecrets, saveRefreshToken, scheduledSlot, totp, unexpectedPostStatus } from './helpers'
+import { duplicateContentFailure, findMailOtp, parseEnv, preserveDatabaseFiles, readPrivateEnv, redactKnownSecrets, saveRefreshToken, scheduledSlot, totp, unexpectedPostStatus } from './helpers'
 import { createXProxy } from './x-proxy'
 import { cleanupTimelinePosts, findTimelinePosts } from './timeline'
 
 type Result = 'pass' | 'fail' | 'not-run'
 type Station = { name: string; result: Result; detail: string }
 type Post = { bundleId: string; state: string; decisionComment: string | null; channel: { postId: string; status: string; url: string | null } | null }
+// Playwright is not a repository dependency and is loaded at runtime; this interface describes only the subset the harness calls.
+interface HarnessPlaywright {
+  chromium: {
+    executablePath(): string
+    launch(options: { headless: boolean }): Promise<{
+      newContext(): Promise<{
+        newPage(): Promise<{
+          goto(url: string): Promise<{ status(): number } | null>
+          locator(selector: string): { fill(value: string): Promise<void>; click(): Promise<void>; innerText(): Promise<string> }
+          waitForNavigation(): Promise<{ status(): number } | null>
+        }>
+        addCookies(cookies: Array<{ name: string; value: string; url: string; httpOnly: boolean; secure: boolean; sameSite: 'Strict' }>): Promise<void>
+      }>
+      close(): Promise<void>
+    }>
+  }
+}
 class NotRun extends Error {}
 class E2eFailure extends Error {}
 const stations: Station[] = []
@@ -55,7 +72,14 @@ async function station(name: string, work: () => Promise<void | string>): Promis
   const detail = await work()
   record(name, 'pass', typeof detail === 'string' ? detail : 'Completed')
 }
-function jsonResponse(response: Response): Promise<Record<string, any>> { return response.json() as Promise<Record<string, any>> }
+function jsonResponse(response: Response): Promise<unknown> {
+  return response.json() as Promise<unknown>
+}
+function jsonFields(value: unknown): Record<string, unknown> {
+  return value as Record<string, unknown>
+}
+interface TweetLookup { includes?: { media?: Array<{ type?: unknown }> } }
+interface DeleteResult { data?: { deleted?: unknown } }
 async function http(url: string, expected: number, init: RequestInit = {}): Promise<Response> {
   const response = await fetch(url, { ...init, redirect: 'manual', signal: AbortSignal.timeout(30_000) })
   check(response.status === expected, `${active}: expected HTTP ${expected}, got ${response.status}`)
@@ -70,8 +94,8 @@ function cookie(response: Response, name: string): string {
   return part
 }
 function headers(session: string): Record<string, string> { return { cookie: session, origin: base, accept: 'application/json' } }
-async function postJson(path: string, session: string, body: unknown, expected = 200): Promise<Record<string, any>> {
-  return jsonResponse(await http(`${base}${path}`, expected, { method: 'POST', headers: { ...headers(session), 'content-type': 'application/json' }, body: JSON.stringify(body) }))
+async function postJson(path: string, session: string, body: unknown, expected = 200): Promise<Record<string, unknown>> {
+  return jsonFields(await jsonResponse(await http(`${base}${path}`, expected, { method: 'POST', headers: { ...headers(session), 'content-type': 'application/json' }, body: JSON.stringify(body) })))
 }
 function claims(token: string): { user: number; account: number } {
   const body = JSON.parse(Buffer.from(token.split('.')[1] ?? '', 'base64url').toString()) as { user?: unknown; account?: unknown }
@@ -79,11 +103,13 @@ function claims(token: string): { user: number; account: number } {
   return { user: body.user, account: body.account }
 }
 async function signedToken(api: string, wallet: HDNodeWallet, endpoint: string): Promise<string> {
-  const challenge = await jsonResponse(await http(`${api}/v1/auth/signMessage?address=${encodeURIComponent(wallet.address)}`, 200))
-  check(typeof challenge.message === 'string', `${active}: missing signing challenge`)
-  const response = await jsonResponse(await http(`${api}${endpoint}`, 201, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ address: wallet.address, signature: await wallet.signMessage(challenge.message) }) }))
-  check(typeof response.accessToken === 'string', `${active}: missing backend token`)
-  return secret(response.accessToken)
+  const challenge = jsonFields(await jsonResponse(await http(`${api}/v1/auth/signMessage?address=${encodeURIComponent(wallet.address)}`, 200)))
+  const message = challenge.message
+  check(typeof message === 'string', `${active}: missing signing challenge`)
+  const response = jsonFields(await jsonResponse(await http(`${api}${endpoint}`, 201, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ address: wallet.address, signature: await wallet.signMessage(message) }) })))
+  const accessToken = response.accessToken
+  check(typeof accessToken === 'string', `${active}: missing backend token`)
+  return secret(accessToken)
 }
 function sql(backend: Record<string, string>, account: number): void {
   const host = backend.SQL_HOST || 'localhost'
@@ -124,7 +150,7 @@ function credentials(): { accessToken: string | null; refreshToken: string } | n
 async function posts(): Promise<Post[]> {
   const current = credentials()
   if (current) { secret(current.refreshToken); if (current.accessToken) secret(current.accessToken) }
-  const data = await jsonResponse(await http(`${base}/api/posts`, 200, { headers: headers(authorCookie) }))
+  const data = jsonFields(await jsonResponse(await http(`${base}/api/posts`, 200, { headers: headers(authorCookie) })))
   check(Array.isArray(data.posts), `${active}: invalid post list`)
   return data.posts as Post[]
 }
@@ -146,13 +172,14 @@ async function inspectPublic(url: string, image = false): Promise<void> {
   const id = url.split('/').at(-1)!
   tweets.add(id)
   if (!publicUrls.includes(url)) publicUrls.push(url)
-  const embed = await jsonResponse(await http(`https://publish.x.com/oembed?url=${encodeURIComponent(url)}`, 200))
-  check(typeof embed.html === 'string' && embed.html.includes(runId), 'Public oEmbed did not contain the run ID')
+  const embed = jsonFields(await jsonResponse(await http(`https://publish.x.com/oembed?url=${encodeURIComponent(url)}`, 200)))
+  const embedHtml = embed.html
+  check(typeof embedHtml === 'string' && embedHtml.includes(runId), 'Public oEmbed did not contain the run ID')
   if (image) {
     const access = credentials()?.accessToken
     check(access, 'Missing current X access token')
     lastAccess = secret(access)
-    const result = await jsonResponse(await http(`https://api.x.com/2/tweets/${id}?expansions=attachments.media_keys&media.fields=type`, 200, { headers: { authorization: `Bearer ${access}` } }))
+    const result = await jsonResponse(await http(`https://api.x.com/2/tweets/${id}?expansions=attachments.media_keys&media.fields=type`, 200, { headers: { authorization: `Bearer ${access}` } })) as TweetLookup
     check(result.includes?.media?.[0]?.type === 'photo', 'Public post does not include a photo')
   }
 }
@@ -160,7 +187,7 @@ async function deleteTweet(id: string): Promise<void> {
   const access = credentials()?.accessToken ?? lastAccess
   check(access, 'Missing X access token for cleanup')
   lastAccess = secret(access)
-  const response = await jsonResponse(await http(`https://api.x.com/2/tweets/${id}`, 200, { method: 'DELETE', headers: { authorization: `Bearer ${access}` } }))
+  const response = await jsonResponse(await http(`https://api.x.com/2/tweets/${id}`, 200, { method: 'DELETE', headers: { authorization: `Bearer ${access}` } })) as DeleteResult
   check(response.data?.deleted === true, 'X did not confirm deletion')
   tweets.delete(id)
   deletedTweets.add(id)
@@ -193,10 +220,10 @@ async function main(): Promise<void> {
     const response = await fetch(`${api}/v1/auth/introspect/admin`, { redirect: 'manual', signal: AbortSignal.timeout(5_000) })
     if (response.status !== 401) throw new NotRun('Backend introspection endpoint did not return 401')
   } catch (error) { if (error instanceof NotRun) throw error; throw new NotRun('Backend is unreachable') }
-  let playwright: any
+  let playwright: HarnessPlaywright
   try {
     const require = createRequire(join(process.cwd(), '_handbook-deps', 'package.json'))
-    playwright = require('playwright')
+    playwright = require('playwright') as HarnessPlaywright
     if (!existsSync(playwright.chromium.executablePath())) throw new Error('Chromium missing')
   } catch { throw new NotRun('Playwright or Chromium is missing from the handbook dependencies') }
   xPath = process.env.OUTBOX_E2E_X_ENV ?? join(homedir(), '.config/outbox-e2e/x.env')
@@ -261,12 +288,13 @@ async function main(): Promise<void> {
     }, 'Backend clearance did not become active')
   })
   await station('approver sign-in', async () => {
-    const challenge = await jsonResponse(await http(`${base}/auth/wallet/message?address=${encodeURIComponent(admin.address)}`, 200))
-    check(typeof challenge.message === 'string', 'Missing Outbox wallet challenge')
-    const response = await http(`${base}/auth/wallet`, 200, { method: 'POST', headers: { origin: base, 'content-type': 'application/json' }, body: JSON.stringify({ address: admin.address, signature: await admin.signMessage(challenge.message) }) })
-    check((await jsonResponse(response)).ok === true, 'Wallet sign-in failed')
+    const challenge = jsonFields(await jsonResponse(await http(`${base}/auth/wallet/message?address=${encodeURIComponent(admin.address)}`, 200)))
+    const message = challenge.message
+    check(typeof message === 'string', 'Missing Outbox wallet challenge')
+    const response = await http(`${base}/auth/wallet`, 200, { method: 'POST', headers: { origin: base, 'content-type': 'application/json' }, body: JSON.stringify({ address: admin.address, signature: await admin.signMessage(message) }) })
+    check(jsonFields(await jsonResponse(response)).ok === true, 'Wallet sign-in failed')
     adminCookie = cookie(response, 'outbox')
-    check((await jsonResponse(await http(`${base}/api/me`, 200, { headers: headers(adminCookie) }))).role === 'ADMIN', 'Approver role was not ADMIN')
+    check(jsonFields(await jsonResponse(await http(`${base}/api/me`, 200, { headers: headers(adminCookie) }))).role === 'ADMIN', 'Approver role was not ADMIN')
   })
   await station('composer sign-in', async () => {
     const mail = `outbox-e2e-${runId}@example.invalid`
@@ -275,9 +303,10 @@ async function main(): Promise<void> {
     await http(`${base}/auth/mail`, 200, { method: 'POST', headers: { origin: base, 'content-type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ mail }).toString() })
     let otp: string | null = null
     await waitUntil(Date.now() + 10_000, 250, async () => { otp = findMailOtp(readFileSync(apiLog, 'utf8'), before, mail); return otp !== null }, 'Mail login link was not logged')
-    const redirect = await jsonResponse(await http(`${api}/v1/auth/mail/redirect?code=${encodeURIComponent(otp!)}`, 200))
-    check(typeof redirect.redirectUrl === 'string', 'Mail redirect URL missing')
-    const redirectUrl = new URL(redirect.redirectUrl)
+    const redirect = jsonFields(await jsonResponse(await http(`${api}/v1/auth/mail/redirect?code=${encodeURIComponent(otp!)}`, 200)))
+    const redirectTarget = redirect.redirectUrl
+    check(typeof redirectTarget === 'string', 'Mail redirect URL missing')
+    const redirectUrl = new URL(redirectTarget)
     check(redirectUrl.origin === base && redirectUrl.pathname === '/auth/callback', 'Unexpected mail callback URL')
     secret(redirectUrl.searchParams.get('session') ?? '')
     const callback = await http(redirectUrl.toString(), 302)
@@ -290,7 +319,7 @@ async function main(): Promise<void> {
     const verification = await http(`${base}/auth/tfa`, 302, { method: 'POST', headers: { origin: base, cookie: pending, 'content-type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ code: totp(setupSecret, Date.now()) }).toString() })
     check(verification.headers.get('location') === '/', 'TOTP did not complete')
     authorCookie = cookie(verification, 'outbox')
-    const me = await jsonResponse(await http(`${base}/api/me`, 200, { headers: headers(authorCookie) }))
+    const me = jsonFields(await jsonResponse(await http(`${base}/api/me`, 200, { headers: headers(authorCookie) })))
     check(me.role === 'OUTBOX' && me.user === composerIdentity.user && me.account === composerIdentity.account, 'Composer identity does not match backend')
     const reused = await http(`${base}/auth/tfa`, 302, { headers: { cookie: pending } })
     check(reused.headers.get('location') === '/login', 'Pending session was reusable')
@@ -314,10 +343,11 @@ async function main(): Promise<void> {
 
       aSlot = scheduledSlot(Date.now())
       const created = await postJson('/api/submit', authorCookie, { text: `Outbox E2E ${runId} rejected`, scheduledAt: aSlot.local })
-      check(typeof created.bundleId === 'string', 'Browser review submission did not return a bundle ID')
-      ids[4] = created.bundleId
+      const createdId = created.bundleId
+      check(typeof createdId === 'string', 'Browser review submission did not return a bundle ID')
+      ids[4] = createdId
       await context.addCookies([{ name: 'outbox', value: adminCookie.slice('outbox='.length), url: base, httpOnly: true, secure: true, sameSite: 'Strict' }])
-      const review = await page.goto(`${base}/review/${encodeURIComponent(created.bundleId)}`)
+      const review = await page.goto(`${base}/review/${encodeURIComponent(createdId)}`)
       check(review?.status() === 200, 'Browser review page unavailable')
       await page.locator('#decision-comment').fill('E2E rejection')
       const [decisionResponse] = await Promise.all([
@@ -337,14 +367,15 @@ async function main(): Promise<void> {
     await postJson('/api/submit', authorCookie, { text: 'e2e-forbidden-phrase', scheduledAt: aSlot.local }, 409)
     for (const [index, text] of [textA, textB, textA, textD].entries()) {
       const slot = index === 2 ? cSlot : index === 3 ? dSlot : aSlot
-      let result: Record<string, any>
+      let result: Record<string, unknown>
       if (index === 1) {
         const form = new FormData()
         form.set('text', text); form.set('scheduledAt', slot.local); form.set('image', new Blob([new Uint8Array(png())], { type: 'image/png' }), 'image.png')
-        result = await jsonResponse(await http(`${base}/api/submit`, 200, { method: 'POST', headers: headers(authorCookie), body: form }))
+        result = jsonFields(await jsonResponse(await http(`${base}/api/submit`, 200, { method: 'POST', headers: headers(authorCookie), body: form })))
       } else result = await postJson('/api/submit', authorCookie, { text, scheduledAt: slot.local })
-      check(typeof result.bundleId === 'string', 'Submission did not return a bundle ID')
-      ids[index] = result.bundleId
+      const bundleId = result.bundleId
+      check(typeof bundleId === 'string', 'Submission did not return a bundle ID')
+      ids[index] = bundleId
     }
     for (const id of ids.slice(0, 4)) await postJson(`/review/${id}/decide`, adminCookie, { decision: 'approve' })
     const rows = await posts()
@@ -401,6 +432,7 @@ try { await main() } catch (error) {
   const detail = error instanceof NotRun ? `not run: ${error.message}` : error instanceof E2eFailure ? error.message : `${active} failed`
   record(active, exitCode === 3 ? 'not-run' : 'fail', detail)
 } finally {
+  let removeTemp = true
   if (hasX && authorCookie) {
     let cleanupFailed = false
     try {
@@ -439,7 +471,18 @@ try { await main() } catch (error) {
       const current = credentials()
       if (current) { secret(current.refreshToken); if (current.accessToken) secret(current.accessToken); saveRefreshToken(xPath, current.refreshToken); record('refresh token', 'pass', 'Current token retained') }
       else record('refresh token', 'not-run', 'No token was stored by Outbox')
-    } catch { exitCode = 1; record('refresh token', 'fail', 'Could not preserve current refresh token') }
+    } catch {
+      exitCode = 1
+      let detail = 'Could not preserve current refresh token'
+      try {
+        const kept = preserveDatabaseFiles(dbPath)
+        detail = `Could not preserve current refresh token. The database was kept at ${kept}`
+      } catch {
+        removeTemp = false
+        detail = `Could not preserve current refresh token. The database was left at ${temp}`
+      }
+      record('refresh token', 'fail', detail)
+    }
   }
   if (logPath && existsSync(logPath)) {
     const log = readFileSync(logPath, 'utf8')
@@ -454,6 +497,6 @@ try { await main() } catch (error) {
   const report = { outboxCommit: git(['rev-parse', 'HEAD'], process.cwd()), outboxDirty: git(['status', '--porcelain'], process.cwd()) !== '', backendCommit: backendDir ? git(['rev-parse', 'HEAD'], backendDir) : 'unavailable', start, end: new Date().toISOString(), stations, publicPostUrls: publicUrls, exitCode }
   writeFileSync('e2e-run.json', `${JSON.stringify(report, null, 2)}\n`)
   process.stdout.write(`| Command | Commit | Exit |\n| --- | --- | --- |\n| npm run test:e2e | ${report.outboxCommit} | ${exitCode} |\n\n| Station | Result | Detail |\n| --- | --- | --- |\n${stations.map((item) => `| ${item.name} | ${item.result} | ${item.detail} |`).join('\n')}\n`)
-  if (temp) rmSync(temp, { recursive: true, force: true })
+  if (temp && removeTemp) rmSync(temp, { recursive: true, force: true })
   process.exitCode = exitCode
 }

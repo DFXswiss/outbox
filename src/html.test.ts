@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  escapeHtml,
   renderComposerPage,
   renderPlainPage,
   renderReviewPage,
@@ -232,11 +233,18 @@ describe('review markup', () => {
   })
 
   it('shows an escaped approver comment to reviewers and trims it in the posts list', () => {
-    const value = '<script>keep safe</script>'
-    const escaped = '&lt;script&gt;keep safe&lt;/script&gt;'
+    const chunk = 'Visible <b> & "o\'k" '
+    const value = `${chunk.repeat(7)}TAIL <script>hidden</script>`
+    expect(Array.from(value).length).toBeGreaterThan(120)
+    const excerpt = truncatePostText(value)
+    expect(excerpt.endsWith('…')).toBe(true)
+    expect(excerpt).not.toBe(value)
+    const escapedExcerpt = escapeHtml(excerpt)
+    const escapedFull = escapeHtml(value)
     const reviewHtml = review({ state: 'rejected', approver: false, decisionComment: value })
     expect(reviewHtml).toContain('<section class="card comment" aria-label="Approver comment">')
-    expect(reviewHtml).toContain(`<p class="comment-text">${escaped}</p>`)
+    expect(reviewHtml).toContain(`<p class="comment-text">${escapedFull}</p>`)
+    expect(reviewHtml).not.toContain(escapedExcerpt)
     expect(reviewHtml).not.toContain(value)
 
     const postsHtml = renderPostsPage({
@@ -246,7 +254,8 @@ describe('review markup', () => {
         channel: null, imageSha256: null, authorMessage: 'Rejected by an approver.', decisionComment: value
       }]
     })
-    expect(postsHtml).toContain(`Comment: ${escaped}`)
+    expect(postsHtml).toContain(`Comment: ${escapedExcerpt}`)
+    expect(postsHtml).not.toContain(escapedFull)
     expect(postsHtml).not.toContain(value)
   })
 

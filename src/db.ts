@@ -87,28 +87,64 @@ CREATE TABLE IF NOT EXISTS media (
 );
 `
 
+const SCHEMA_VERSION = 1
+
+const OUTBOX_TABLES = [
+  'bundles',
+  'entries',
+  'scheduled_posts',
+  'publish_results',
+  'x_credentials',
+  'audit',
+  'auth_pending',
+  'media'
+] as const
+
+type SqliteHandle = InstanceType<typeof Database>
+
+function readUserVersion(db: SqliteHandle): number {
+  const value = db.pragma('user_version', { simple: true })
+  return typeof value === 'number' && Number.isInteger(value) ? value : Number.NaN
+}
+
+function hasOutboxTable(db: SqliteHandle): boolean {
+  const placeholders = OUTBOX_TABLES.map(() => '?').join(', ')
+  const row = db.prepare(
+    `SELECT 1 FROM sqlite_master WHERE type = 'table' AND name IN (${placeholders}) LIMIT 1`
+  ).get(...OUTBOX_TABLES)
+  return row !== undefined
+}
+
 /**
- * Opens (or creates) a SQLite file at `filePath`. The path is required; this
- * module does not pick a location.
+ * Opens or creates a SQLite file at `filePath`. The path is required; this
+ * module does not pick a location. A file that already has Outbox tables from
+ * a different schema version is closed and rejected without being changed.
  */
 export function openDatabase(filePath: string) {
   const db = new Database(filePath, { timeout: BUSY_TIMEOUT_MS })
+  const version = readUserVersion(db)
+  if (hasOutboxTable(db) && version !== SCHEMA_VERSION) {
+    db.close()
+    throw new Error(
+      `This database was created by an unreleased version of Outbox (schema version ${version}). Start with a new database file.`
+    )
+  }
   db.pragma('journal_mode = WAL')
   db.pragma('foreign_keys = ON')
   db.pragma(`busy_timeout = ${BUSY_TIMEOUT_MS}`)
-  db.exec(SCHEMA)
-  const entryColumns = db.pragma('table_info(entries)') as Array<{ name: string }>
-  if (!entryColumns.some((column) => column.name === 'decisionComment')) {
-    db.exec('ALTER TABLE entries ADD COLUMN decisionComment TEXT')
-  }
-  const auditColumns = db.pragma('table_info(audit)') as Array<{ name: string }>
-  const hasActorKind = auditColumns.some((column) => column.name === 'actorKind')
-  const actorKindGap = !hasActorKind || db.prepare('SELECT 1 FROM audit WHERE actorKind IS NULL LIMIT 1').get() !== undefined
-  if (actorKindGap) {
-    db.transaction(() => {
-      if (!hasActorKind) db.exec('ALTER TABLE audit ADD COLUMN actorKind TEXT')
-      db.exec(`UPDATE audit SET actorKind = CASE WHEN actorUser IS NULL AND actorAccount IS NULL THEN 'system' ELSE 'user' END WHERE actorKind IS NULL`)
-    }).immediate()
+  if (version !== SCHEMA_VERSION) {
+    const install = db.transaction(() => {
+      db.exec(SCHEMA)
+      db.pragma(`user_version = ${SCHEMA_VERSION}`)
+    })
+    try {
+      install.immediate()
+    } catch (error) {
+      db.close()
+      throw error
+    }
+  } else {
+    db.exec(SCHEMA)
   }
   return db
 }

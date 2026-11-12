@@ -1,5 +1,7 @@
 import { createHmac } from 'node:crypto'
-import { chmodSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+import { chmodSync, copyFileSync, existsSync, mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { parseZurichDateTime } from '../../src/time'
 import type { SqliteDatabase } from '../../src/db'
 
@@ -83,6 +85,19 @@ export function findMailOtp(content: string, offset: number, mail: string): stri
     } catch { continue }
   }
   return null
+}
+
+export function preserveDatabaseFiles(dbPath: string): string {
+  const directory = mkdtempSync(join(tmpdir(), 'outbox-e2e-keep-'))
+  chmodSync(directory, 0o700)
+  for (const suffix of ['', '-wal', '-shm']) {
+    const source = `${dbPath}${suffix}`
+    if (!existsSync(source)) continue
+    const target = join(directory, `outbox.sqlite${suffix}`)
+    copyFileSync(source, target)
+    chmodSync(target, 0o600)
+  }
+  return directory
 }
 
 export function scheduledSlot(now: number, offsetSlots = 0): { epoch: number; local: string } {

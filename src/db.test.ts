@@ -1,10 +1,46 @@
 import Database from 'better-sqlite3'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { openDatabase } from './db'
 import { writeAudit } from './audit'
+
+const LEGACY_AUDIT = `CREATE TABLE audit (
+  id TEXT PRIMARY KEY,
+  at INTEGER NOT NULL,
+  event TEXT NOT NULL,
+  bundleId TEXT,
+  entryId TEXT,
+  actorUser TEXT NOT NULL,
+  actorAccount TEXT NOT NULL,
+  reason TEXT
+)`
+
+function writeLegacyAudit(file: string, userVersion: number): void {
+  const oldDb = new Database(file)
+  oldDb.exec(LEGACY_AUDIT)
+  oldDb.prepare(
+    `INSERT INTO audit (id, at, event, actorUser, actorAccount) VALUES (?, ?, ?, ?, ?)`
+  ).run('legacy-system', 1, 'published', 'system', 'system')
+  if (userVersion !== 0) oldDb.pragma(`user_version = ${userVersion}`)
+  oldDb.close()
+}
+
+function legacySnapshot(file: string): { bytes: Buffer; sql: unknown; row: unknown; version: unknown } {
+  const bytes = readFileSync(file)
+  const db = new Database(file, { readonly: true, fileMustExist: true })
+  try {
+    return {
+      bytes,
+      sql: db.prepare(`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'audit'`).get(),
+      row: db.prepare('SELECT actorUser, actorAccount FROM audit').get(),
+      version: db.pragma('user_version', { simple: true })
+    }
+  } finally {
+    db.close()
+  }
+}
 
 const tempDirs: string[] = []
 
@@ -12,7 +48,7 @@ afterEach(() => {
   for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true })
 })
 
-describe('decision comment migration', () => {
+describe('schema version', () => {
   it('stores numeric user identities separately from system audit events', () => {
     const db = openDatabase(':memory:')
     const event = { at: 1, event: 'published' as const, bundleId: null, entryId: null, reason: null }
@@ -24,103 +60,36 @@ describe('decision comment migration', () => {
     expect(columns.find((column) => column.name === 'authoredByAccount')?.type).toBe('INTEGER')
     db.close()
   })
-  it('adds decisionComment to an old entries table and tolerates opening the file again', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'legacy-schema-'))
+
+  it('creates a new file at schema version 1 and opens it again', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'outbox-schema-'))
     tempDirs.push(dir)
     const file = join(dir, 'state.sqlite')
-    const oldDb = new Database(file)
-    oldDb.exec(`CREATE TABLE entries (
-      id TEXT PRIMARY KEY,
-      bundleId TEXT NOT NULL,
-      state TEXT NOT NULL,
-      text TEXT NOT NULL,
-      scheduledAt INTEGER NOT NULL,
-      imageSha256 TEXT,
-      contentHash TEXT NOT NULL,
-      checks TEXT,
-      decidedByUser TEXT,
-      decidedByAccount TEXT,
-      decidedAt INTEGER
-    )`)
-    oldDb.close()
-
-    const migrated = openDatabase(file)
-    const columns = migrated.pragma('table_info(entries)') as Array<{ name: string }>
-    expect(columns.map((column) => column.name)).toContain('decisionComment')
-    migrated.close()
-
+    const created = openDatabase(file)
+    expect(created.pragma('user_version', { simple: true })).toBe(1)
+    created.close()
     const reopened = openDatabase(file)
-    const reopenedColumns = reopened.pragma('table_info(entries)') as Array<{ name: string }>
-    expect(reopenedColumns.filter((column) => column.name === 'decisionComment')).toHaveLength(1)
+    expect(reopened.pragma('user_version', { simple: true })).toBe(1)
     reopened.close()
   })
-})
 
-describe('audit actor migration', () => {
-  it('adds actorKind to an old audit table and tolerates opening the file again', () => {
+  it.each([0, 2])('rejects an unreleased Outbox file at schema version %s without changing it', (userVersion) => {
     const dir = mkdtempSync(join(tmpdir(), 'legacy-audit-'))
     tempDirs.push(dir)
     const file = join(dir, 'state.sqlite')
-    const oldDb = new Database(file)
-    oldDb.exec(`CREATE TABLE audit (
-      id TEXT PRIMARY KEY,
-      at INTEGER NOT NULL,
-      event TEXT NOT NULL,
-      bundleId TEXT,
-      entryId TEXT,
-      actorUser INTEGER,
-      actorAccount INTEGER,
-      reason TEXT
-    )`)
-    const insert = oldDb.prepare('INSERT INTO audit (id, at, event, actorUser, actorAccount) VALUES (?, ?, ?, ?, ?)')
-    insert.run('legacy-system', 1, 'published', null, null)
-    insert.run('legacy-user', 2, 'published', 17, 23)
-    oldDb.close()
-
-    const legacy = [
-      { id: 'legacy-system', actorKind: 'system', actorUser: null, actorAccount: null },
-      { id: 'legacy-user', actorKind: 'user', actorUser: 17, actorAccount: 23 }
-    ]
-    const migrated = openDatabase(file)
-    expect(migrated.prepare('SELECT id, actorKind, actorUser, actorAccount FROM audit ORDER BY at').all()).toEqual(legacy)
-    migrated.close()
-
-    const reopened = openDatabase(file)
-    expect(reopened.prepare('SELECT id, actorKind, actorUser, actorAccount FROM audit ORDER BY at').all()).toEqual(legacy)
-    reopened.close()
-  })
-
-  it('fills null actorKind when the column was added without a backfill', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'partial-audit-'))
-    tempDirs.push(dir)
-    const file = join(dir, 'state.sqlite')
-    const oldDb = new Database(file)
-    oldDb.exec(`CREATE TABLE audit (
-      id TEXT PRIMARY KEY,
-      at INTEGER NOT NULL,
-      event TEXT NOT NULL,
-      bundleId TEXT,
-      entryId TEXT,
-      actorUser INTEGER,
-      actorAccount INTEGER,
-      reason TEXT,
-      actorKind TEXT
-    )`)
-    const insert = oldDb.prepare('INSERT INTO audit (id, at, event, actorUser, actorAccount, actorKind) VALUES (?, ?, ?, ?, ?, NULL)')
-    insert.run('partial-system', 1, 'published', null, null)
-    insert.run('partial-user', 2, 'published', 17, 23)
-    oldDb.close()
-
-    const filled = [
-      { id: 'partial-system', actorKind: 'system', actorUser: null, actorAccount: null },
-      { id: 'partial-user', actorKind: 'user', actorUser: 17, actorAccount: 23 }
-    ]
-    const migrated = openDatabase(file)
-    expect(migrated.prepare('SELECT id, actorKind, actorUser, actorAccount FROM audit ORDER BY at').all()).toEqual(filled)
-    migrated.close()
-
-    const reopened = openDatabase(file)
-    expect(reopened.prepare('SELECT id, actorKind, actorUser, actorAccount FROM audit ORDER BY at').all()).toEqual(filled)
-    reopened.close()
+    writeLegacyAudit(file, userVersion)
+    const before = legacySnapshot(file)
+    expect(before.version).toBe(userVersion)
+    const bytes = readFileSync(file)
+    expect(() => openDatabase(file)).toThrow(
+      `This database was created by an unreleased version of Outbox (schema version ${userVersion}). Start with a new database file.`
+    )
+    expect(existsSync(`${file}-wal`)).toBe(false)
+    expect(existsSync(`${file}-shm`)).toBe(false)
+    expect(readFileSync(file)).toEqual(bytes)
+    const after = legacySnapshot(file)
+    expect(after.sql).toEqual(before.sql)
+    expect(after.row).toEqual({ actorUser: 'system', actorAccount: 'system' })
+    expect(after.version).toBe(userVersion)
   })
 })
