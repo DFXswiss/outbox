@@ -30,12 +30,13 @@ function fakeFetch(): typeof fetch {
     const url = new URL(String(input))
     if (url.pathname === '/2/oauth2/token') {
       // Shape: https://docs.x.com/fundamentals/authentication/oauth-2-0/authorization-code
+      // Captured from an X refresh response on 2026-11-10; token values are replaced placeholders.
       return new Response(JSON.stringify({
         access_token: 'test-access-token',
         refresh_token: 'rotated-test-refresh-token',
         expires_in: 7200,
         token_type: 'bearer',
-        scope: 'tweet.read tweet.write users.read'
+        scope: 'offline.access tweet.write media.write users.read tweet.read'
       }), {
         status: 200,
         headers: { 'content-type': 'application/json' }

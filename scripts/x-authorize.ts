@@ -1,10 +1,11 @@
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
-import { chmodSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+import { readFileSync, statSync } from 'node:fs'
 import { createServer } from 'node:http'
 import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { spawn } from 'node:child_process'
 import { pathToFileURL } from 'node:url'
+import { parseEnv, saveRefreshToken } from './env-file'
 
 const REDIRECT = 'http://127.0.0.1:8765/callback'
 const SCOPES = 'tweet.read tweet.write users.read offline.access media.write'
@@ -25,14 +26,10 @@ export function validState(received: string, expected: string): boolean {
 function readEnvironment(path: string): { content: string; clientId: string; clientSecret: string; handle: string } {
   if ((statSync(path).mode & 0o777) !== 0o600) throw new Error('Env file must have mode 600.')
   const content = readFileSync(path, 'utf8')
-  const values = new Map<string, string>()
-  for (const line of content.split(/\r?\n/)) {
-    const match = /^\s*(X_CLIENT_ID|X_CLIENT_SECRET|X_HANDLE)\s*=\s*(.*?)\s*$/.exec(line)
-    if (match) values.set(match[1]!, match[2]!.replace(/^(["'])(.*)\1$/, '$2'))
-  }
-  const clientId = values.get('X_CLIENT_ID') ?? ''
-  const clientSecret = values.get('X_CLIENT_SECRET') ?? ''
-  const handle = (values.get('X_HANDLE') ?? '').replace(/^@/, '')
+  const values = parseEnv(content)
+  const clientId = values.X_CLIENT_ID ?? ''
+  const clientSecret = values.X_CLIENT_SECRET ?? ''
+  const handle = (values.X_HANDLE ?? '').replace(/^@/, '')
   if (!clientId || !clientSecret || !/^[A-Za-z0-9_]{1,15}$/.test(handle)) throw new Error('Missing or invalid X authorization configuration.')
   return { content, clientId, clientSecret, handle }
 }
@@ -118,7 +115,7 @@ async function receiveBrowserCode(url: string, state: string, output: (line: str
 }
 
 export async function authorize(options: AuthorizeOptions): Promise<void> {
-  const { content, clientId, clientSecret, handle } = readEnvironment(options.envPath)
+  const { clientId, clientSecret, handle } = readEnvironment(options.envPath)
   const fetchImpl = options.fetch ?? fetch
   const output = options.output ?? ((line: string) => process.stdout.write(`${line}\n`))
   const verifier = randomBytes(32).toString('base64url')
@@ -144,11 +141,7 @@ export async function authorize(options: AuthorizeOptions): Promise<void> {
   if (userResponse.status !== 200) throw new Error('X account lookup failed.')
   const user = await userResponse.json() as { data?: { username?: unknown } }
   if (typeof user.data?.username !== 'string' || user.data.username.toLowerCase() !== handle.toLowerCase()) throw new Error('X account does not match X_HANDLE.')
-  const lines = content.split(/\r?\n/).filter((line) => !/^\s*X_REFRESH_TOKEN\s*=/.test(line))
-  while (lines.length && lines[lines.length - 1] === '') lines.pop()
-  lines.push(`X_REFRESH_TOKEN=${tokens.refresh_token}`)
-  writeFileSync(options.envPath, `${lines.join('\n')}\n`, { mode: 0o600 })
-  chmodSync(options.envPath, 0o600)
+  saveRefreshToken(options.envPath, tokens.refresh_token)
   output(`Refresh token stored for @${handle}.`)
 }
 

@@ -168,7 +168,7 @@ function renderChecks(recorded: EntryChecks | null | undefined): string {
 type PlainPageKind = 'success' | 'error' | 'neutral'
 
 function plainPageKind(title: string): PlainPageKind {
-  if (title === 'Decided' || title === 'Post updated') return 'success'
+  if (title === 'Decided' || title === 'Post updated' || title === 'Email sent') return 'success'
   if (title === 'Sign in required') return 'neutral'
   return 'error'
 }

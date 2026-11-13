@@ -487,15 +487,16 @@ async function main() {
   const loginContext = await browser.newContext({ viewport, deviceScaleFactor })
   const loginPage = await loginContext.newPage()
   await loginPage.goto(`http://127.0.0.1:${appPort}/login`)
-  await capture(loginPage, '06-login', '01-login', ['Sign in with email', 'Sign in with wallet'])
+  await capture(loginPage, '06-login', '01-login', ['Sign in with email', 'Sign in with wallet', 'No wallet found. Install or enable a browser wallet.'])
   await loginPage.locator('#mail').fill('test@example.invalid')
   await Promise.all([loginPage.waitForNavigation(), loginPage.locator('form[action="/auth/mail"] button').click()])
   await capture(loginPage, '06-login', '02-mail-sent', ['Open the link in the email to continue'])
+  if (await loginPage.locator('.result-icon.success').count() !== 1 || await loginPage.locator('.result-icon.error').count() !== 0) fail('06-login/02-mail-sent: expected success icon without error icon')
   await loginPage.goto(`http://127.0.0.1:${appPort}/auth/callback?session=${encodeURIComponent(jwt('OUTBOX'))}`)
   await capture(loginPage, '06-login', '03-tfa-setup', [totpSecret, 'six-digit code'])
   tfaMode = 'configured'
   await loginPage.reload()
-  await capture(loginPage, '06-login', '04-tfa-code', ['six-digit code'])
+  await capture(loginPage, '06-login', '04-tfa-code', ['six-digit code'], { absent: ['Set up your authenticator', 'Secret:'] })
   tfaMode = 'wrong'
   await loginPage.locator('#code').fill('123456')
   await Promise.all([loginPage.waitForNavigation(), loginPage.locator('form[action="/auth/tfa"] button').click()])
@@ -503,12 +504,12 @@ async function main() {
   tfaMode = 'kyc'
   await loginPage.locator('#code').fill('123456')
   await Promise.all([loginPage.waitForNavigation(), loginPage.locator('form[action="/auth/tfa"] button').click()])
-  await capture(loginPage, '06-login', '06-kyc', ['no verified name'])
+  await capture(loginPage, '06-login', '06-kyc', ['no verified name'], { absent: ['six-digit code'] })
   tfaMode = 'retry'
   await loginPage.goto(`http://127.0.0.1:${appPort}/auth/callback?session=${encodeURIComponent(jwt('OUTBOX'))}`)
   await loginPage.locator('#code').fill('123456')
   await Promise.all([loginPage.waitForNavigation(), loginPage.locator('form[action="/auth/tfa"] button').click()])
-  await capture(loginPage, '06-login', '07-tfa-retry', ['Please try again.', 'six-digit code'])
+  await capture(loginPage, '06-login', '07-tfa-retry', ['Please try again.', 'six-digit code'], { absent: ['Invalid code'] })
   tfaMode = 'configured'
   await loginContext.close()
 

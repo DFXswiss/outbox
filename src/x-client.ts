@@ -177,7 +177,8 @@ export function createXClient(options: XClientOptions) {
     if (response.status === 429) {
       const raw = response.headers.get('x-rate-limit-reset')
       const seconds = raw && /^\d+$/.test(raw) ? Number(raw) : NaN
-      const reset = Number.isSafeInteger(seconds) && seconds * 1000 > now() && seconds * 1000 <= 8_640_000_000_000_000 ? seconds * 1000 : now() + 900_000
+      const current = now()
+      const reset = Number.isSafeInteger(seconds) && seconds * 1000 > current && seconds * 1000 <= current + 86_400_000 ? seconds * 1000 : current + 900_000
       rateLimitReset = Math.max(rateLimitReset, reset)
     }
     return response

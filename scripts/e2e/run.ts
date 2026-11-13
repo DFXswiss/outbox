@@ -9,7 +9,7 @@ import Database from 'better-sqlite3'
 import { HDNodeWallet, Wallet } from 'ethers'
 import { duplicateContentFailure, findMailOtp, parseEnv, preserveDatabaseFiles, readPrivateEnv, redactKnownSecrets, saveRefreshToken, scheduledSlot, totp, unexpectedPostStatus } from './helpers'
 import { createXProxy } from './x-proxy'
-import { cleanupTimelinePosts, findTimelinePosts } from './timeline'
+import { cleanupTweetsAfterStop, findTimelinePosts } from './timeline'
 
 type Result = 'pass' | 'fail' | 'not-run'
 type Station = { name: string; result: Result; detail: string }
@@ -67,6 +67,15 @@ function git(args: string[], cwd: string): string {
   return result.stdout.trim()
 }
 function record(name: string, result: Result, detail: string): void { stations.push({ name, result, detail }) }
+async function stopOutbox(): Promise<void> {
+  const processToStop = child
+  if (!processToStop || processToStop.exitCode !== null || processToStop.signalCode !== null) return
+  await new Promise<void>((resolvePromise) => {
+    const timer = setTimeout(() => { processToStop.kill('SIGKILL'); resolvePromise() }, 110_000)
+    processToStop.once('exit', () => { clearTimeout(timer); resolvePromise() })
+    processToStop.kill('SIGTERM')
+  })
+}
 async function station(name: string, work: () => Promise<void | string>): Promise<void> {
   active = name
   const detail = await work()
@@ -449,7 +458,7 @@ try { await main() } catch (error) {
     }
     active = 'cleanup tweets'
     try {
-      await cleanupTimelinePosts(async () => {
+      await cleanupTweetsAfterStop(stopOutbox, async () => {
         const posts = await timelinePosts()
         for (const post of posts) {
           const url = `https://x.com/${xHandle}/status/${post.id}`
@@ -461,10 +470,7 @@ try { await main() } catch (error) {
     if (cleanupFailed) { exitCode = 1; record(active, 'fail', 'Tweet cleanup failed') }
     else record(active, 'pass', 'Run tweets deleted')
   }
-  if (child && child.exitCode === null) {
-    child.kill('SIGTERM')
-    await new Promise<void>((resolvePromise) => { const timer = setTimeout(() => { child?.kill('SIGKILL'); resolvePromise() }, 110_000); child!.once('exit', () => { clearTimeout(timer); resolvePromise() }) })
-  }
+  await stopOutbox()
   if (proxy?.server.listening) await new Promise<void>((resolvePromise) => proxy!.server.close(() => resolvePromise()))
   if (hasX && dbPath && existsSync(dbPath)) {
     try {

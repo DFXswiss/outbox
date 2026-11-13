@@ -323,6 +323,7 @@ function validImage(bytes: Buffer | null): boolean {
 
 export function createOutboxServer(deps: OutboxServerDeps): Server {
   const now = deps.now ?? (() => Date.now())
+  deps.db.prepare('DELETE FROM auth_pending WHERE createdAt <= ?').run(now() - 600_000)
   const brand = deps.brand
   const upstream = (deps.dfxApiBaseUrl ?? '').replace(/\/$/, '')
   const publicUrl = deps.outboxPublicUrl ?? ''
@@ -470,8 +471,7 @@ export function createOutboxServer(deps: OutboxServerDeps): Server {
           return
         }
         const setup = await upstreamRequest('/v1/auth/2fa?level=Strict', { method: 'POST', headers })
-        // 200 is a recent strict proof. It must not issue a cookie; the current code is still required.
-        if (setup.status === 200 || setup.status === 409) { sendHtml(res, 200, renderTfaPage()); return }
+        if (setup.status === 409) { sendHtml(res, 200, renderTfaPage()); return }
         if (setup.status === 201) {
           const body = await setup.json() as { secret?: unknown; uri?: unknown }
           if (typeof body.secret === 'string' && typeof body.uri === 'string') { sendHtml(res, 200, renderTfaPage({ secret: body.secret, uri: body.uri })); return }

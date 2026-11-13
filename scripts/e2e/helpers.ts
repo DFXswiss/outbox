@@ -1,9 +1,11 @@
 import { createHmac } from 'node:crypto'
-import { chmodSync, copyFileSync, existsSync, mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+import { chmodSync, copyFileSync, existsSync, mkdtempSync, readFileSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { parseZurichDateTime } from '../../src/time'
 import type { SqliteDatabase } from '../../src/db'
+import { parseEnv } from '../env-file'
+export { parseEnv, saveRefreshToken } from '../env-file'
 
 export function redactKnownSecrets(value: string, secrets: Iterable<string>): string {
   let result = value
@@ -35,27 +37,9 @@ export function unexpectedPostStatus(
   return redactKnownSecrets(`X publish ${status}: ${detail}`, secrets)
 }
 
-export function parseEnv(content: string): Record<string, string> {
-  const result: Record<string, string> = {}
-  for (const line of content.split(/\r?\n/)) {
-    const match = /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*$/.exec(line)
-    if (match) result[match[1]!] = match[2]!.replace(/^(["'])(.*)\1$/, '$2')
-  }
-  return result
-}
-
 export function readPrivateEnv(path: string): Record<string, string> {
   if ((statSync(path).mode & 0o777) !== 0o600) throw new Error('X environment file must have mode 600')
   return parseEnv(readFileSync(path, 'utf8'))
-}
-
-export function saveRefreshToken(path: string, token: string): void {
-  if ((statSync(path).mode & 0o777) !== 0o600 || !token || /[\r\n]/.test(token)) throw new Error('Cannot safely store X refresh token')
-  const lines = readFileSync(path, 'utf8').split(/\r?\n/).filter((line) => !/^\s*(?:export\s+)?X_REFRESH_TOKEN\s*=/.test(line))
-  while (lines.at(-1) === '') lines.pop()
-  lines.push(`X_REFRESH_TOKEN=${token}`)
-  writeFileSync(path, `${lines.join('\n')}\n`, { mode: 0o600 })
-  chmodSync(path, 0o600)
 }
 
 export function totp(secret: string, epochMs: number, digits = 6): string {

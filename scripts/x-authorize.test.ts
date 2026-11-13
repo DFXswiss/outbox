@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
-import { chmodSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { authorize, startAuthorizationCallback, validState } from './x-authorize'
 
@@ -29,6 +29,7 @@ function fixture(mode = 0o600) {
 describe('X authorization', () => {
   it('uses S256 PKCE, replaces the token, and never prints credentials', async () => {
     const envPath = fixture()
+    writeFileSync(envPath, 'export X_CLIENT_ID="client"\nexport X_CLIENT_SECRET=secret\nexport X_HANDLE=Example\nexport X_REFRESH_TOKEN=old\n')
     const output: string[] = []
     let challenge = ''
     const fetchStub: typeof fetch = async (input, init) => {
@@ -50,7 +51,9 @@ describe('X authorization', () => {
     const contents = readFileSync(envPath, 'utf8')
     expect(contents.match(/^X_REFRESH_TOKEN=/gm)).toHaveLength(1)
     expect(contents).toContain('X_REFRESH_TOKEN=refresh-secret')
+    expect(contents).not.toContain('export X_REFRESH_TOKEN=')
     expect(statSync(envPath).mode & 0o777).toBe(0o600)
+    expect(readdirSync(dirname(envPath))).toEqual(['x.env'])
     expect(output.join('\n')).not.toMatch(/access-secret|refresh-secret/)
   })
 
@@ -79,8 +82,9 @@ describe('X authorization', () => {
   it('does not write when X omits a required scope', async () => {
     const envPath = fixture()
     const before = readFileSync(envPath, 'utf8')
+    // Constructed: remove media.write from the captured scope to test a missing grant.
     const fetchStub: typeof fetch = async (input) => String(input).endsWith('/oauth2/token')
-      ? Response.json({ ...TOKEN_RESPONSE, scope: 'offline.access tweet.write users.read tweet.read' })
+      ? Response.json({ ...TOKEN_RESPONSE, scope: TOKEN_RESPONSE.scope.split(' ').filter((scope) => scope !== 'media.write').join(' ') })
       : Response.json({ data: { id: '1', name: 'Example', username: 'example' } })
     await expect(authorize({ envPath, fetch: fetchStub, receiveCode: async () => 'code' })).rejects.toThrow('X did not grant: media.write')
     expect(readFileSync(envPath, 'utf8')).toBe(before)

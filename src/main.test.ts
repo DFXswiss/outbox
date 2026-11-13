@@ -41,16 +41,19 @@ describe('application process', () => {
       exited = once(child, 'exit')
       const deadline = Date.now() + 20_000
       let status = 0
+      let health: unknown
       while (Date.now() < deadline) {
         if (child.exitCode !== null || child.signalCode !== null) throw new Error(`Outbox exited before startup: ${stderr}`)
         try {
           const response = await fetch(`http://127.0.0.1:${port}/healthz`, { signal: AbortSignal.timeout(500) })
           status = response.status
-          if (status === 200) break
+          if (status === 200) { health = await response.json(); break }
         } catch { /* The process has not bound its port yet. */ }
         await new Promise((resolve) => setTimeout(resolve, 100))
       }
       expect(status, `Outbox did not serve healthz: ${stderr}`).toBe(200)
+      expect(typeof (health as { ok?: unknown }).ok).toBe('boolean')
+      expect(child.exitCode).toBeNull()
     } finally {
       if (reservation.listening) await new Promise<void>((resolve) => reservation.close(() => resolve()))
       if (child && child.exitCode === null && child.signalCode === null) {

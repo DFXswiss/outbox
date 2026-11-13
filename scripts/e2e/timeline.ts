@@ -1,5 +1,15 @@
 type JsonRequest = (path: string) => Promise<unknown>
 
+export async function cleanupTweetsAfterStop(
+  stop: () => Promise<void>,
+  read: () => Promise<Array<{ id: string; text: string }>>,
+  remove: (id: string) => Promise<void>,
+  knownIds: Iterable<string>
+): Promise<void> {
+  await stop()
+  await cleanupTimelinePosts(read, remove, knownIds)
+}
+
 /** Finds all run posts, following pagination so an older post cannot be missed. */
 export async function findTimelinePosts(request: JsonRequest, runId: string): Promise<Array<{ id: string; text: string }>> {
   if (!runId) throw new Error('Run ID is required')

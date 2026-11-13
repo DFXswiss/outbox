@@ -346,6 +346,7 @@ describe('stale content before the queue insert', () => {
     const result = decideEntry(db, { entryId: missing.entryId, decision: 'approve', comment: null, actor: APPROVER, now: NOW })
     expect(result).toMatchObject({ ok: false, reason: 'not-approvable' })
     expect(queueFor(missing.entryId)).toEqual([])
+    expect(entryState(missing.entryId)).toBe('submitted')
   })
 })
 

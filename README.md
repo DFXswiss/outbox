@@ -11,7 +11,7 @@ This repository is the Outbox **application**. Deployment config lives in the in
 ## Goals
 
 1. Phase 1: publish to **X** through the official API (OAuth 2.0) for **one** brand, with a real post as proof.
-2. Login is the existing DFX JWT (`api.dfx.swiss`). Compose/submit requires `hasRoleAccess(OUTBOX, payload.role)` — the user's own `UserRole.OUTBOX`, or Admin/SuperAdmin via additionalRoles. Grant Outbox like Support: set `User.role` on the user of the target userData. Approve requires `UserRole.ADMIN`.
+2. Login is the existing DFX JWT (`api.dfx.swiss`). `Outbox` maps to `OUTBOX`, and `Admin`/`SuperAdmin` map to `ADMIN`; compose/submit requires `hasRoleAccess(OUTBOX, mappedRole)`, including Admin via additionalRoles. Grant Outbox like Support: set `User.role` on the user of the target userData. Approve requires `UserRole.ADMIN`.
 3. Approval is the only insert into the send queue. GET never mutates.
 4. Outcomes `sent` | `failed` | `uncertain`. `uncertain` is never auto-retried. Approvers retry `failed` and resolve `uncertain`.
 5. No LLM. Content packs (`facts-sheet.md`, `voice-guide.md`, `rules.json`) are deterministic checks.
@@ -55,7 +55,7 @@ Browser/SSR uses the cookie. Outbox always sends `Authorization: Bearer` to the 
 
 **Checks inside Outbox**
 
-- Verify HS256 with the **same JWT secret** as the DFX API. Mail-elevated staff tokens include `address`. Account tokens do not; they are not enough. A token is accepted only when `address` is a non-empty string, `user` and `account` are positive integers, and `exp` is a number that has not expired. Outbox users need a wallet, like Support.
+- When `JWT_SECRET` is set, verify HS256 with the **same JWT secret** as the DFX API and check claims including `address` and `exp`. Mail-elevated staff tokens include `address`. Account tokens do not; they are not enough. A token is accepted only when `address` is a non-empty string, `user` and `account` are positive integers, and `exp` is a number that has not expired. Outbox users need a wallet, like Support. Without `JWT_SECRET`, mail login is disabled and `/healthz` reports the `jwt` probe as bad.
 - Only the roles `Outbox`, `Admin`, and `SuperAdmin` are accepted. `Outbox` maps to `OUTBOX`; `Admin` and `SuperAdmin` map to `ADMIN`. `hasRoleAccess` receives that mapped role. Compose/submit/retract: `OUTBOX` (retract also `authoredBy`; Outbox introspect). Decide/retry/resolve: `ADMIN` (Admin introspect). Retract is **not** Admin-only. Admin/SuperAdmin may compose via additionalRoles.
 - Audit uses JWT `user` and `account`, never a typed email.
 - Introspect **every** authenticated route (HTML GET, API, mutations).
@@ -167,7 +167,7 @@ Channel status: `pending | in-flight | sent | failed | uncertain`. `PublishResul
 
 - OAuth 2.0 user token against `api.x.com`.
 - Scopes: `tweet.read`, `tweet.write`, `users.read`, `offline.access`, and `media.write` for media upload.
-- One-shot `POST /2/media/upload` (`media_category=tweet_image`) before `POST /2/tweets`; refresh `POST /2/oauth2/token`.
+- One-shot `POST /2/media/upload` (`media_category=tweet_image`) before `POST /2/tweets`; when `processing_info` is present, poll `GET /2/media/upload?command=STATUS` no sooner than one second later until `succeeded`. A `failed` or unknown state or deadline ends as `failed` before the tweet. Refresh uses `POST /2/oauth2/token`.
 - One refresh on HTTP 401, never a second. Failed refresh **after dispatch** (tweet call already sent) → CAS `in-flight → uncertain` plus `needs-login` alert, no loop. Failed refresh **before dispatch** → `failed` (retry allowed).
 - Any media upload failure occurs before the tweet request, so it is `failed` and no tweet request is sent.
 - No auto-retry after an accepted `POST /2/tweets`.
@@ -269,7 +269,7 @@ What is not real:
 
 SQLite WAL. Tables: bundles, entries, scheduled_posts, publish_results, audit, media, x_credentials (the X OAuth token pair; the refresh token is stored at rest because it rotates). There is no `drafts` table.
 
-Pending mail sessions are stored in `auth_pending` for at most ten minutes and removed after use. Audit rows distinguish `actorKind = 'user'` with numeric JWT IDs from `actorKind = 'system'` with null IDs.
+Pending mail sessions in `auth_pending` are unusable after ten minutes. Expired rows are deleted at the next login step or server restart; used rows are deleted immediately. Audit rows distinguish `actorKind = 'user'` with numeric JWT IDs from `actorKind = 'system'` with null IDs.
 
 Phase 1: **one entry per bundle**. `GET`/`POST /review/:id` uses the bundle id. `media` stores deduplicated PNG/JPEG bytes by SHA-256.
 

@@ -21,6 +21,12 @@ const review = (overrides: Partial<Parameters<typeof renderReviewPage>[0]> = {})
 })
 
 describe('composer markup', () => {
+  it('renders the email sent result with a check rather than a cross', () => {
+    const html = renderPlainPage('Email sent', 'Open the link in the email to continue')
+    expect(html).toContain('class="result-icon success"')
+    expect(html).toContain('d="m5 12 4 4L19 6"')
+    expect(html).not.toContain('d="m6 6 12 12M18 6 6 18"')
+  })
   it('escapes every dynamic composer text field', () => {
     const value = "<x>&'"
     const escaped = '&lt;x&gt;&amp;&#39;'
@@ -169,9 +175,10 @@ describe('post excerpts', () => {
   })
 
   it('counts emoji as code points and escapes the rendered excerpt', () => {
-    const text = `${'😀'.repeat(121)}<tail>`
-    expect(truncatePostText(text)).toBe(`${'😀'.repeat(120)}…`)
-    expect(post(text)).toContain(`<p>${'😀'.repeat(120)}…</p>`)
+    const text = `<tag>${'😀'.repeat(121)}`
+    expect(truncatePostText(text)).toBe(`<tag>${'😀'.repeat(115)}…`)
+    expect(post(text)).toContain(`<p>&lt;tag&gt;${'😀'.repeat(115)}…</p>`)
+    expect(post(text)).not.toContain('<tag>')
   })
 })
 

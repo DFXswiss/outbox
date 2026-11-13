@@ -6,6 +6,8 @@ import { openDatabase, type SqliteDatabase } from './db'
 import { createXClient, loadCredentials, seedCredentials } from './x-client'
 
 const NOW = 1_700_000_000_000
+// Captured from an X refresh response on 2026-11-10; token values are replaced placeholders.
+const TOKEN_RESPONSE = { token_type: 'bearer', expires_in: 7200, scope: 'offline.access tweet.write media.write users.read tweet.read', access_token: 'test-access-token', refresh_token: 'test-refresh-token' }
 let dir: string
 let db: SqliteDatabase
 beforeEach(() => {
@@ -52,8 +54,9 @@ describe('X publisher client', () => {
         : endpoint === 'upload' ? url.endsWith('/2/media/upload')
         : url.endsWith('/2/tweets')
       // Shape: https://docs.x.com/x-api/fundamentals/rate-limits
-      if (target) return new Response(JSON.stringify({ code: 88, message: 'Rate limit exceeded' }), { status: 429, headers: { 'x-rate-limit-reset': '1700000060' } })
+      if (target) return new Response(JSON.stringify({ errors: [{ code: 88, message: 'Rate limit exceeded' }] }), { status: 429, headers: { 'x-rate-limit-reset': '1700000060' } })
       // Shape: https://docs.x.com/x-api/media/upload-media
+      // check_after_secs 0 is a chosen boundary, not a captured delay.
       if (url.endsWith('/2/media/upload')) return json({ data: { id: '1880028106020515840', processing_info: { state: 'pending', check_after_secs: 0 } } })
       // Shape: https://docs.x.com/x-api/posts/create-post
       return json({ data: { id: '123', text: 'hello' } }, 201)
@@ -64,10 +67,11 @@ describe('X publisher client', () => {
   })
   it.each([
     { header: '1700000060', expected: NOW + 60_000 },
+    { header: String(NOW), expected: NOW + 900_000 },
     { header: undefined, expected: NOW + 900_000 }
   ])('records a 429 reset with header $header', async ({ header, expected }) => {
     // Shape: https://docs.x.com/x-api/fundamentals/rate-limits
-    const x = client(async () => new Response(JSON.stringify({ code: 88, message: 'Rate limit exceeded' }), { status: 429, headers: header ? { 'x-rate-limit-reset': header } : {} }))
+    const x = client(async () => new Response(JSON.stringify({ errors: [{ code: 88, message: 'Rate limit exceeded' }] }), { status: 429, headers: header ? { 'x-rate-limit-reset': header } : {} }))
     await x.postTweet('hello', NOW + 20_000)
     expect(x.rateLimitUntil()).toBe(expected)
   })
@@ -82,6 +86,7 @@ describe('X publisher client', () => {
     const x = client(async (input) => {
       const url = String(input)
       // Shape: https://docs.x.com/x-api/media/upload-media
+      // check_after_secs 0 is a chosen boundary, not a captured delay.
       if (url.endsWith('/2/media/upload')) return json({ data: { id: '1880028106020515840', processing_info: { state: 'pending', check_after_secs: 0 } } })
       // Shape: https://docs.x.com/x-api/media/get-media-upload-status
       if (url.includes('?command=STATUS')) return json({ data: statusData })
@@ -99,6 +104,7 @@ describe('X publisher client', () => {
     const x = client(async (input) => {
       const url = String(input)
       // Shape: https://docs.x.com/x-api/media/upload-media
+      // check_after_secs 0 is a chosen boundary, not a captured delay.
       if (url.endsWith('/2/media/upload')) return json({ data: { id: '1880028106020515840', processing_info: { state: 'pending', check_after_secs: 0 } } })
       if (url.includes('?command=STATUS')) {
         statusAt.push(Date.now())
@@ -118,7 +124,7 @@ describe('X publisher client', () => {
   })
 
   it('includes top-level X error code and message while redacting credentials', async () => {
-    // Shape: https://docs.x.com/x-api/fundamentals/response-codes-and-errors
+    // Constructed: top-level error with a credential to exercise redaction in this branch.
     const x = client(async () => json({ code: 88, message: 'Rejected test-access-token' }, 429))
     const response = await x.postTweet('hello', NOW + 20_000)
     expect(response.result.error).toBe('HTTP 429: 88: Rejected [redacted]')
@@ -198,10 +204,8 @@ describe('X publisher client', () => {
         refreshes += 1
         // Shape: https://docs.x.com/fundamentals/authentication/oauth-2-0/authorization-code
         return json({
-          token_type: 'bearer',
-          expires_in: 7200,
+          ...TOKEN_RESPONSE,
           access_token: 'new-access-token',
-          scope: 'tweet.read tweet.write users.read',
           refresh_token: 'new-refresh-token'
         })
       }
@@ -235,10 +239,8 @@ describe('X publisher client', () => {
         refreshes += 1
         // Shape: https://docs.x.com/fundamentals/authentication/oauth-2-0/authorization-code
         return json({
-          token_type: 'bearer',
-          expires_in: 7200,
+          ...TOKEN_RESPONSE,
           access_token: 'new-access-token',
-          scope: 'tweet.read tweet.write users.read',
           refresh_token: 'new-refresh-token'
         })
       }
@@ -325,10 +327,8 @@ describe('X publisher client', () => {
         tokenRequests += 1
         // Shape: https://docs.x.com/fundamentals/authentication/oauth-2-0/authorization-code
         return json({
-          token_type: 'bearer',
-          expires_in: 7200,
+          ...TOKEN_RESPONSE,
           access_token: 'refreshed-access-token',
-          scope: 'tweet.read tweet.write users.read',
           refresh_token: 'rotated-refresh-token'
         })
       }
@@ -455,10 +455,8 @@ describe('X publisher client', () => {
         tokenRequests += 1
         // Shape: https://docs.x.com/fundamentals/authentication/oauth-2-0/authorization-code
         return json({
-          token_type: 'bearer',
-          expires_in: 7200,
+          ...TOKEN_RESPONSE,
           access_token: 'refreshed-access-token',
-          scope: 'tweet.read tweet.write users.read',
           refresh_token: 'rotated-refresh-token'
         })
       }
@@ -479,10 +477,10 @@ describe('X publisher client', () => {
     db.prepare('UPDATE x_credentials SET accessTokenExpiresAt = NULL WHERE id = 1').run()
     // Shape: https://docs.x.com/fundamentals/authentication/oauth-2-0/authorization-code
     const x = client(async () => json({
-      token_type: 'bearer',
+      ...TOKEN_RESPONSE,
+      // Constructed: shorter expiry exercises the stored expiry calculation.
       expires_in: 120,
       access_token: 'refreshed-access-token',
-      scope: 'tweet.read tweet.write users.read',
       refresh_token: 'rotated-refresh-token'
     }))
 
@@ -505,10 +503,8 @@ describe('X publisher client', () => {
         expect(payload).toBe('test-client:test-client-secret')
         // Shape: https://docs.x.com/fundamentals/authentication/oauth-2-0/authorization-code
         return json({
-          token_type: 'bearer',
-          expires_in: 7200,
+          ...TOKEN_RESPONSE,
           access_token: 'refreshed-access-token',
-          scope: 'tweet.read tweet.write users.read',
           refresh_token: 'rotated-refresh-token'
         })
       }
@@ -570,14 +566,14 @@ describe('X publisher client', () => {
         refreshes += 1
         // Shape: https://docs.x.com/fundamentals/authentication/oauth-2-0/authorization-code
         return json({
-          token_type: 'bearer',
-          expires_in: 7200,
+          ...TOKEN_RESPONSE,
           access_token: 'refreshed-access-token',
-          scope: 'tweet.read tweet.write users.read'
+          refresh_token: undefined // Constructed: no replacement refresh token.
         })
       }
       if (url.endsWith('/2/media/upload')) {
         // Shape: https://docs.x.com/x-api/media/upload-media
+        // check_after_secs 0 is a chosen boundary, not a captured delay.
         return json({ data: { id: '1880028106020515840', processing_info: { state: 'pending', check_after_secs: 0 } } })
       }
       if (url.includes('/2/media/upload?command=STATUS')) {
@@ -658,10 +654,9 @@ describe('X publisher client', () => {
         tokens += 1
         // Shape: https://docs.x.com/fundamentals/authentication/oauth-2-0/authorization-code
         return json({
-          token_type: 'bearer',
-          expires_in: 7200,
+          ...TOKEN_RESPONSE,
           access_token: 'test-access-token',
-          scope: 'tweet.read tweet.write users.read'
+          refresh_token: undefined // Constructed: no replacement refresh token.
         })
       }
       tweets += 1
@@ -704,10 +699,9 @@ describe('X publisher client', () => {
       await gate
       // Shape: https://docs.x.com/fundamentals/authentication/oauth-2-0/authorization-code
       return json({
-        token_type: 'bearer',
-        expires_in: 7200,
+        ...TOKEN_RESPONSE,
         access_token: 'shared-access-token',
-        scope: 'tweet.read tweet.write users.read'
+        refresh_token: undefined // Constructed: no replacement refresh token.
       })
     })
     const first = shared.ensureAccessToken(NOW + 20_000)
@@ -727,10 +721,9 @@ describe('X publisher client', () => {
       authorization = new Headers(init?.headers).get('authorization')
       // Shape: https://docs.x.com/fundamentals/authentication/oauth-2-0/authorization-code
       return json({
-        token_type: 'bearer',
-        expires_in: 7200,
+        ...TOKEN_RESPONSE,
         access_token: 'test-access-token',
-        scope: 'tweet.read tweet.write users.read'
+        refresh_token: undefined // Constructed: no replacement refresh token.
       })
     })
     await x.ensureAccessToken(NOW + 20_000)
@@ -741,10 +734,9 @@ describe('X publisher client', () => {
     db.prepare('UPDATE x_credentials SET accessTokenExpiresAt = NULL WHERE id = 1').run()
     // Shape: https://docs.x.com/fundamentals/authentication/oauth-2-0/authorization-code
     const x = client(async () => json({
-      token_type: 'bearer',
-      expires_in: 7200,
+      ...TOKEN_RESPONSE,
       access_token: 'new-test-access-token',
-      scope: 'tweet.read tweet.write users.read'
+      refresh_token: undefined // Constructed: verify that a missing replacement is retained.
     }))
     await x.ensureAccessToken(NOW + 20_000)
     expect(loadCredentials(db)?.refreshToken).toBe('test-refresh-token')
@@ -800,10 +792,9 @@ describe('X publisher client', () => {
       if (url.endsWith('/2/oauth2/token')) {
         // Shape: https://docs.x.com/fundamentals/authentication/oauth-2-0/authorization-code
         return json({
-          token_type: 'bearer',
-          expires_in: 7200,
+          ...TOKEN_RESPONSE,
           access_token: 'refreshed-test-access-token',
-          scope: 'tweet.read tweet.write users.read'
+          refresh_token: undefined // Constructed: no replacement refresh token.
         })
       }
       // Shape: https://docs.x.com/x-api/users/get-my-user
