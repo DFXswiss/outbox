@@ -1,3 +1,3 @@
 # Uncertain post marked as failed
 
-The page says Post updated and shows the `failed` status. The approver resolved the uncertain outcome as a failure.
+The page shows the Outbox brand, a success icon, the heading “Post updated,” and the message “Post status: failed.”

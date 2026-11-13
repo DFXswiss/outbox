@@ -13,9 +13,11 @@ export type PublisherDeps = {
   db: SqliteDatabase
   x: {
     probe(): Promise<'ok' | 'bad'>
+    rateLimitUntil?(): number
     postTweet(
       text: string,
-      deadlineMs: number
+      deadlineMs: number,
+      imageBytes?: Buffer | Uint8Array | null
     ): Promise<{ result: PublishResult; needsLogin: boolean }>
   }
   alert: AlertSink
@@ -50,6 +52,12 @@ export function createPublisher(deps: PublisherDeps) {
     lastProbeAt = now()
     try {
       state = await deps.x.probe()
+      const reset = deps.x.rateLimitUntil?.() ?? 0
+      if (reset > now()) {
+        state = 'bad'
+        deps.alert({ kind: 'failed', detail: `X rate limit resets at ${new Date(reset).toISOString()}` })
+        lastProbeAt = Number.NEGATIVE_INFINITY
+      }
     } catch {
       state = 'bad'
     }
@@ -64,6 +72,7 @@ export function createPublisher(deps: PublisherDeps) {
     const run = async () => {
       let post: ClaimedPost | null
       try {
+        if ((deps.x.rateLimitUntil?.() ?? 0) > now()) return
         if (state !== 'ok') {
           if (now() - lastProbeAt < reprobeMs) {
             return
@@ -82,35 +91,55 @@ export function createPublisher(deps: PublisherDeps) {
         return
       }
 
+      let dispatchStarted = false
+      let result: PublishResult | null = null
       try {
-        let result: PublishResult
         let needsLogin = false
-        if (post.imageSha256 !== null) {
+        let imageBytes: Buffer | null = null
+        try {
+          if (post.imageSha256 !== null) {
+            const stored = deps.db.prepare('SELECT bytes FROM media WHERE sha256 = ?').get(post.imageSha256) as { bytes: Buffer } | undefined
+            imageBytes = stored?.bytes ?? null
+            if (!imageBytes) {
+              result = { channel: 'x', ok: false, error: 'image missing' }
+            } else if (contentHash(post.text, post.scheduledAt, imageBytes) !== post.contentHash) {
+              result = { channel: 'x', ok: false, error: 'content changed after approval' }
+            }
+          } else if (contentHash(post.text, post.scheduledAt, null) !== post.contentHash) {
+            result = { channel: 'x', ok: false, error: 'content changed after approval' }
+          }
+        } catch {
           result = {
             channel: 'x',
             ok: false,
-            error: 'image posts are not supported yet'
+            error: 'unexpected publisher preparation failure'
           }
-        } else if (
-          contentHash(post.text, post.scheduledAt, null) !== post.contentHash
-        ) {
-          result = {
-            channel: 'x',
-            ok: false,
-            error: 'content changed after approval'
+        }
+
+        if (result === null) {
+          try {
+            let published: Awaited<ReturnType<PublisherDeps['x']['postTweet']>>
+            dispatchStarted = true
+            if (imageBytes === null) {
+              published = await deps.x.postTweet(post.text, now() + budgetMs)
+            } else {
+              published = await deps.x.postTweet(post.text, now() + budgetMs, imageBytes)
+            }
+            result = published.result
+            needsLogin = published.needsLogin
+          } catch {
+            result = {
+              channel: 'x',
+              ok: false,
+              uncertain: true,
+              error: 'unexpected publish failure'
+            }
           }
-        } else {
-          const published = await deps.x.postTweet(
-            post.text,
-            now() + budgetMs
-          )
-          result = published.result
-          needsLogin = published.needsLogin
         }
 
         const finished = finishPost(deps.db, {
           postId: post.postId,
-          result,
+          result: result!,
           now: now()
         })
         if (!finished.ok) {
@@ -120,19 +149,24 @@ export function createPublisher(deps: PublisherDeps) {
           state = 'bad'
           lastProbeAt = now()
         }
+        const reset = deps.x.rateLimitUntil?.() ?? 0
+        if (reset > now()) {
+          state = 'bad'
+          lastProbeAt = Number.NEGATIVE_INFINITY
+        }
         try {
           if (finished.status === 'failed' || finished.status === 'uncertain') {
             deps.alert({
               kind: finished.status,
               postId: post.postId,
-              detail: result.error ?? finished.status
+              detail: `${result!.error ?? finished.status}${reset > now() ? `; X rate limit resets at ${new Date(reset).toISOString()}` : ''}`
             })
           }
           if (needsLogin) {
             deps.alert({
               kind: 'needs-login',
               postId: post.postId,
-              detail: result.error ?? 'X login required'
+              detail: result!.error ?? 'X login required'
             })
           }
         } catch {
@@ -140,25 +174,28 @@ export function createPublisher(deps: PublisherDeps) {
         }
       } catch {
         const detail = 'unexpected publisher failure'
+        const uncertain = result === null
+          ? dispatchStarted
+          : result.ok || result.uncertain === true
         try {
           const finished = finishPost(deps.db, {
             postId: post.postId,
             result: {
               channel: 'x',
               ok: false,
-              uncertain: true,
+              uncertain,
               error: detail
             },
             now: now()
           })
           deps.alert({
-            kind: 'uncertain',
+            kind: uncertain ? 'uncertain' : 'failed',
             postId: post.postId,
             detail: finished.ok ? detail : 'could not record publish outcome'
           })
         } catch {
           deps.alert({
-            kind: 'uncertain',
+            kind: uncertain ? 'uncertain' : 'failed',
             postId: post.postId,
             detail: 'could not record publish outcome'
           })
@@ -235,7 +272,7 @@ export function createPublisher(deps: PublisherDeps) {
     start,
     stop,
     running: () => active,
-    probeState: () => state,
+    probeState: () => (deps.x.rateLimitUntil?.() ?? 0) > now() ? 'bad' : state,
     tick
   }
 }

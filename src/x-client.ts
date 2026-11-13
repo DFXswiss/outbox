@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto'
 import type { SqliteDatabase } from './db'
+import { IMAGE_LIMIT, imageMime } from './image'
 import type { PublishResult } from './status'
 
 type Credentials = {
@@ -89,7 +90,10 @@ function errorDetail(
   const values: string[] = [`HTTP ${status}`]
   if (body && typeof body === 'object' && !Array.isArray(body)) {
     const record = body as Record<string, unknown>
-    for (const key of ['title', 'detail']) {
+    if (typeof record.code === 'number' && Number.isInteger(record.code)) {
+      values.push(String(record.code))
+    }
+    for (const key of ['title', 'detail', 'message', 'error', 'error_description']) {
       if (typeof record[key] === 'string') {
         values.push(record[key] as string)
       }
@@ -151,6 +155,7 @@ export function createXClient(options: XClientOptions) {
   const now = options.now ?? (() => Date.now())
   const root = (options.apiBase ?? 'https://api.x.com').replace(/\/$/, '')
   let refreshFlight: Promise<string> | null = null
+  let rateLimitReset = 0
 
   async function request(
     url: string,
@@ -168,7 +173,15 @@ export function createXClient(options: XClientOptions) {
       signal: AbortSignal.timeout(remaining)
     }
     onDispatch?.()
-    return fetchImpl(url, requestInit)
+    const response = await fetchImpl(url, requestInit)
+    if (response.status === 429) {
+      const raw = response.headers.get('x-rate-limit-reset')
+      const seconds = raw && /^\d+$/.test(raw) ? Number(raw) : NaN
+      const current = now()
+      const reset = Number.isSafeInteger(seconds) && seconds * 1000 > current && seconds * 1000 <= current + 86_400_000 ? seconds * 1000 : current + 900_000
+      rateLimitReset = Math.max(rateLimitReset, reset)
+    }
+    return response
   }
 
   async function refresh(deadlineMs: number): Promise<string> {
@@ -303,7 +316,8 @@ export function createXClient(options: XClientOptions) {
 
   async function postTweet(
     text: string,
-    deadlineMs: number
+    deadlineMs: number,
+    imageBytes?: Buffer | Uint8Array | null
   ): Promise<{ result: PublishResult; needsLogin: boolean }> {
     let token: string
     try {
@@ -312,6 +326,96 @@ export function createXClient(options: XClientOptions) {
       return {
         result: { channel: 'x', ok: false, error: safeError(error) },
         needsLogin: true
+      }
+    }
+
+    let refreshUsed = false
+    const refreshAfter401 = async (): Promise<{ ok: true } | { ok: false; error: unknown }> => {
+      if (refreshUsed) return { ok: false, error: new Error('Refresh already used') }
+      refreshUsed = true
+      try {
+        token = await refresh(deadlineMs)
+        return { ok: true }
+      } catch (error) {
+        return { ok: false, error }
+      }
+    }
+
+    let mediaId: string | undefined
+    if (imageBytes && imageBytes.byteLength > 0) {
+      const bytes = Buffer.from(imageBytes)
+      const mime = imageMime(bytes)
+      if (bytes.byteLength > IMAGE_LIMIT || mime === null) {
+        return { result: { channel: 'x', ok: false, error: 'Image must be a PNG or JPEG up to 5 MB.' }, needsLogin: false }
+      }
+      const upload = async (): Promise<Response> => {
+        const form = new FormData()
+        const blobBytes = new Uint8Array(bytes.byteLength)
+        blobBytes.set(bytes)
+        form.append('media', new Blob([blobBytes], { type: mime }), mime === 'image/png' ? 'image.png' : 'image.jpg')
+        form.append('media_category', 'tweet_image')
+        return request(
+          `${root}/2/media/upload`,
+          { method: 'POST', headers: { authorization: `Bearer ${token}` }, body: form },
+          deadlineMs
+        )
+      }
+      try {
+        let response = await upload()
+        if (response.status === 401) {
+          const refreshed = await refreshAfter401()
+          if (!refreshed.ok) {
+            return { result: { channel: 'x', ok: false, error: safeError(refreshed.error) }, needsLogin: true }
+          }
+          response = await upload()
+        }
+        let body: unknown
+        try { body = await response.json() } catch { body = null }
+        if (!response.ok) {
+          return { result: { channel: 'x', ok: false, error: errorDetail(response.status, body, credentialSecrets(token, loadCredentials(options.db)?.refreshToken ?? '', options.clientId, options.clientSecret)) }, needsLogin: response.status === 401 }
+        }
+        const data = body && typeof body === 'object' ? (body as Record<string, unknown>).data : null
+        mediaId = data && typeof data === 'object' && typeof (data as Record<string, unknown>).id === 'string'
+          ? (data as Record<string, unknown>).id as string : undefined
+        if (!mediaId) return { result: { channel: 'x', ok: false, error: 'Invalid X media upload response.' }, needsLogin: false }
+        let processing = data && typeof data === 'object' ? (data as Record<string, unknown>).processing_info : null
+        if (processing != null && (typeof processing !== 'object' || Array.isArray(processing))) {
+          return { result: { channel: 'x', ok: false, error: 'Invalid X media processing response.' }, needsLogin: false }
+        }
+        while (processing && typeof processing === 'object') {
+          const info = processing as Record<string, unknown>
+          const state = info.state
+          if (state === 'succeeded') break
+          if (state === 'failed') return { result: { channel: 'x', ok: false, error: 'X media processing failed.' }, needsLogin: false }
+          if (state !== 'pending' && state !== 'in_progress') return { result: { channel: 'x', ok: false, error: 'Invalid X media processing state.' }, needsLogin: false }
+          const requestedMs = typeof info.check_after_secs === 'number' ? info.check_after_secs * 1000 : Number.NaN
+          const waitMs = Number.isFinite(requestedMs) && requestedMs >= 1000 ? requestedMs : 1000
+          if (now() + waitMs >= deadlineMs) return { result: { channel: 'x', ok: false, error: 'Request deadline exceeded' }, needsLogin: false }
+          await new Promise((resolve) => setTimeout(resolve, waitMs))
+          const statusRequest = async (): Promise<Response> => request(
+            `${root}/2/media/upload?command=STATUS&media_id=${encodeURIComponent(mediaId!)}`,
+            { headers: { authorization: `Bearer ${token}` } }, deadlineMs
+          )
+          let statusResponse = await statusRequest()
+          if (statusResponse.status === 401) {
+            const refreshed = await refreshAfter401()
+            if (!refreshed.ok) return { result: { channel: 'x', ok: false, error: safeError(refreshed.error) }, needsLogin: true }
+            statusResponse = await statusRequest()
+          }
+          let statusBody: unknown
+          try { statusBody = await statusResponse.json() } catch { statusBody = null }
+          if (!statusResponse.ok) return { result: { channel: 'x', ok: false, error: errorDetail(statusResponse.status, statusBody, credentialSecrets(token, loadCredentials(options.db)?.refreshToken ?? '', options.clientId, options.clientSecret)) }, needsLogin: statusResponse.status === 401 }
+          const statusData = statusBody && typeof statusBody === 'object' ? (statusBody as Record<string, unknown>).data : null
+          if (!statusData || typeof statusData !== 'object' || Array.isArray(statusData) || (statusData as Record<string, unknown>).id !== mediaId) {
+            return { result: { channel: 'x', ok: false, error: 'Invalid X media status response.' }, needsLogin: false }
+          }
+          processing = (statusData as Record<string, unknown>).processing_info
+          if (processing === undefined) break
+          if (typeof processing !== 'object' || Array.isArray(processing)) return { result: { channel: 'x', ok: false, error: 'Invalid X media status response.' }, needsLogin: false }
+          if (processing === null) return { result: { channel: 'x', ok: false, error: 'Invalid X media status response.' }, needsLogin: false }
+        }
+      } catch (error) {
+        return { result: { channel: 'x', ok: false, error: safeError(error) }, needsLogin: false }
       }
     }
 
@@ -328,7 +432,7 @@ export function createXClient(options: XClientOptions) {
             authorization: `Bearer ${accessToken}`,
             'content-type': 'application/json'
           },
-          body: JSON.stringify({ text })
+          body: JSON.stringify({ text, ...(mediaId ? { media: { media_ids: [mediaId] } } : {}) })
         },
         deadlineMs,
         () => {
@@ -351,16 +455,15 @@ export function createXClient(options: XClientOptions) {
       }
     }
 
-    if (response.status === 401) {
-      try {
-        token = await refresh(deadlineMs)
-      } catch (error) {
+    if (response.status === 401 && !refreshUsed) {
+      const refreshed = await refreshAfter401()
+      if (!refreshed.ok) {
         return {
           result: {
             channel: 'x',
             ok: false,
             uncertain: true,
-            error: safeError(error)
+            error: safeError(refreshed.error)
           },
           needsLogin: true
         }
@@ -436,5 +539,5 @@ export function createXClient(options: XClientOptions) {
     return { result: { channel: 'x', ok: false, error }, needsLogin: false }
   }
 
-  return { probe, postTweet, ensureAccessToken }
+  return { probe, postTweet, ensureAccessToken, rateLimitUntil: () => rateLimitReset }
 }

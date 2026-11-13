@@ -1,0 +1,7 @@
+{
+  "topic": "e2e",
+  "forbiddenClaims": ["e2e-forbidden-phrase"],
+  "provisionalParameters": [],
+  "micarUnsafe": [],
+  "maxEmoji": 3
+}

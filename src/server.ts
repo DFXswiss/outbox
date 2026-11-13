@@ -5,6 +5,7 @@ import {
   type ServerResponse
 } from 'node:http'
 import { readFileSync, readdirSync } from 'node:fs'
+import { randomBytes } from 'node:crypto'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { z } from 'zod'
@@ -19,20 +20,29 @@ import {
 } from './entries'
 import { characterCount, costHint, loadPackRules, reviewText } from './findings'
 import {
+  authorStatusMessage,
   renderComposerPage,
+  renderLoginPage,
+  renderTfaPage,
   renderPlainPage,
+  renderPostsPage,
   renderReviewPage
 } from './html'
-import { hasRoleAccess, type Identity, type Introspect, type Role } from './identity'
+import { decodeJwtHs256, validJwtClaims, hasRoleAccess, type Identity, type Introspect, type Role } from './identity'
+import { IMAGE_LIMIT, imageMime } from './image'
 import { createLog } from './log'
 import { resolveUncertain, retryPost } from './queue'
-import { formatZurich, parseZurichDateTime } from './time'
+import { formatZurich, nextSlotZurich, parseZurichDateTime } from './time'
 
 export type OutboxServerDeps = {
   db: SqliteDatabase
   packRoot: string
   brand: string
   introspect: Introspect
+  dfxApiBaseUrl?: string
+  outboxPublicUrl?: string
+  fetch?: typeof fetch
+  xMaxWeightedLength?: number
   now?: () => number
   jwtSecret?: string
   log?: (line: string) => void
@@ -44,6 +54,7 @@ export type OutboxServerDeps = {
 const COOKIE_NAME = 'outbox'
 const COOKIE_MAX_AGE_SEC = 12 * 60 * 60
 const BODY_LIMIT = 1_000_000
+const MULTIPART_LIMIT = 6 * 1024 * 1024
 const ResolveInputSchema = z.object({
   resolution: z.enum(['sent', 'failed']),
   url: z.string().optional()
@@ -51,8 +62,8 @@ const ResolveInputSchema = z.object({
 
 const SECURITY_HEADERS: Record<string, string> = {
   'content-security-policy':
-    "default-src 'none'; style-src 'unsafe-inline'; font-src 'self'; form-action 'self'; base-uri 'none'",
-  'referrer-policy': 'no-referrer',
+    "default-src 'none'; script-src 'self'; connect-src 'self'; img-src 'self' blob:; style-src 'unsafe-inline'; font-src 'self'; form-action 'self'; base-uri 'none'",
+  'referrer-policy': 'same-origin',
   'x-content-type-options': 'nosniff',
   'x-robots-tag': 'noindex, nofollow',
   'cache-control': 'private, no-store'
@@ -65,15 +76,17 @@ type EntryView = {
   text: string
   scheduledAt: number
   checks: string | null
-  authoredByUser: string
-  authoredByAccount: string
+  decisionComment: string | null
+  authoredByUser: number
+  authoredByAccount: number
   postId: string | null
   channel: string | null
   channelStatus: string | null
   postUrl: string | null
+  imageSha256: string | null
 }
 
-const ENTRY_VIEW_SQL = `SELECT e.id, e.bundleId, e.state, e.text, e.scheduledAt, e.checks,
+const ENTRY_VIEW_SQL = `SELECT e.id, e.bundleId, e.state, e.text, e.scheduledAt, e.checks, e.decisionComment, e.imageSha256,
        b.authoredByUser, b.authoredByAccount, p.id AS postId, p.channel,
        p.status AS channelStatus, p.url AS postUrl
 FROM entries e
@@ -94,6 +107,12 @@ function mediaType(req: IncomingMessage): string {
 function wantsJson(req: IncomingMessage, pathname: string): boolean {
   const type = mediaType(req)
   if (type === 'application/x-www-form-urlencoded') return false
+  if (type === 'multipart/form-data') {
+    const accept = headerString(req.headers.accept) ?? ''
+    if (accept.includes('text/html')) return false
+    if (accept.includes('application/json')) return true
+    return pathname.startsWith('/api/')
+  }
   if (type === 'application/json') return true
   if (pathname.startsWith('/api/')) return true
   const accept = headerString(req.headers.accept) ?? ''
@@ -104,7 +123,7 @@ function send(
   res: ServerResponse,
   status: number,
   body: string | Buffer,
-  headers: Record<string, string>
+  headers: Record<string, string | string[]>
 ): void {
   res.writeHead(status, { ...SECURITY_HEADERS, ...headers })
   res.end(body)
@@ -157,7 +176,8 @@ function tokenFromRequest(
 
 function requestOriginHost(req: IncomingMessage): string | null {
   const origin = headerString(req.headers.origin)
-  if (origin && origin !== 'null') {
+  if (origin === 'null') return null
+  if (origin) {
     try {
       return new URL(origin).host.toLowerCase()
     } catch {
@@ -183,24 +203,58 @@ function originMatchesHost(req: IncomingMessage): boolean {
   return from === host.toLowerCase()
 }
 
-async function readBody(req: IncomingMessage): Promise<string | null> {
+async function readBodyBytes(req: IncomingMessage, limit: number): Promise<Buffer | null> {
   const chunks: Buffer[] = []
   let total = 0
   for await (const chunk of req) {
     const buf = chunk as Buffer
     total += buf.length
-    if (total > BODY_LIMIT) return null
+    if (total > limit) return null
     chunks.push(buf)
   }
-  return Buffer.concat(chunks).toString('utf8')
+  return Buffer.concat(chunks)
+}
+
+async function readBody(req: IncomingMessage): Promise<string | null> {
+  const bytes = await readBodyBytes(req, BODY_LIMIT)
+  return bytes === null ? null : bytes.toString('utf8')
 }
 
 async function parseFields(
   req: IncomingMessage
-): Promise<{ ok: true; fields: Record<string, string> } | { ok: false; status: number; message: string }> {
+): Promise<{ ok: true; fields: Record<string, string>; imageBytes: Buffer | null } | { ok: false; status: number; message: string }> {
+  const type = mediaType(req)
+  if (type === 'multipart/form-data') {
+    const contentType = headerString(req.headers['content-type']) ?? ''
+    const rawBytes = await readBodyBytes(req, MULTIPART_LIMIT)
+    if (rawBytes === null) return { ok: false, status: 413, message: 'Request body is too large.' }
+    try {
+      const form = await new Request('http://localhost/', {
+        method: 'POST', headers: { 'content-type': contentType }, body: rawBytes
+      }).formData()
+      const fields: Record<string, string> = {}
+      const images = form.getAll('image')
+      if (images.length > 1) return { ok: false, status: 400, message: 'Only one image may be attached.' }
+      let textBytes = 0
+      for (const [key, value] of form.entries()) {
+        if (key === 'image') continue
+        if (typeof value !== 'string') return { ok: false, status: 400, message: 'Form fields must be text.' }
+        textBytes += Buffer.byteLength(value, 'utf8')
+        if (textBytes > BODY_LIMIT) return { ok: false, status: 413, message: 'Request body is too large.' }
+        fields[key] = value
+      }
+      const image = images[0]
+      if (image !== undefined && typeof image !== 'string') {
+        const bytes = Buffer.from(await image.arrayBuffer())
+        return { ok: true, fields, imageBytes: bytes.length === 0 ? null : bytes }
+      }
+      return { ok: true, fields, imageBytes: null }
+    } catch {
+      return { ok: false, status: 400, message: 'Invalid multipart form data.' }
+    }
+  }
   const raw = await readBody(req)
   if (raw === null) return { ok: false, status: 413, message: 'Request body is too large.' }
-  const type = mediaType(req)
   if (type === 'application/json') {
     let parsed: unknown
     try {
@@ -219,12 +273,12 @@ async function parseFields(
       }
       fields[key] = value
     }
-    return { ok: true, fields }
+    return { ok: true, fields, imageBytes: null }
   }
   if (type === 'application/x-www-form-urlencoded' || type === '') {
     const fields: Record<string, string> = {}
     for (const [key, value] of new URLSearchParams(raw).entries()) fields[key] = value
-    return { ok: true, fields }
+    return { ok: true, fields, imageBytes: null }
   }
   return { ok: false, status: 415, message: 'Unsupported Content-Type.' }
 }
@@ -234,7 +288,7 @@ function loadEntryByBundle(db: SqliteDatabase, bundleId: string): EntryView | nu
   return rows[0] ?? null
 }
 
-function listEntries(db: SqliteDatabase, account: string | null): EntryView[] {
+function listEntries(db: SqliteDatabase, account: number | null): EntryView[] {
   if (account === null) {
     return db.prepare(`${ENTRY_VIEW_SQL} ORDER BY e.scheduledAt ASC`).all() as EntryView[]
   }
@@ -248,9 +302,32 @@ function isVisible(identity: Identity, row: EntryView): boolean {
   return row.authoredByAccount === identity.account
 }
 
+function scheduledInput(fields: Record<string, string>): { raw: string; values: { scheduledDate: string; scheduledHour: string; scheduledMinute: string } } | null {
+  const scheduledAt = fields.scheduledAt ?? ''
+  if (scheduledAt !== '') {
+    const match = /^(\d{4}-\d{2}-\d{2})T(\d{2}):(\d{2})(?::(\d{2}))?$/.exec(scheduledAt)
+    if (!match) return null
+    return { raw: `${match[1]}T${match[2]}:${match[3]}${match[4] ? `:${match[4]}` : ''}`, values: { scheduledDate: match[1]!, scheduledHour: match[2]!, scheduledMinute: match[3]! } }
+  }
+  const date = fields.scheduledDate ?? ''
+  const hour = fields.scheduledHour ?? ''
+  const minute = fields.scheduledMinute ?? ''
+  if (!date || !hour || !minute) return null
+  return { raw: `${date}T${hour}:${minute}`, values: { scheduledDate: date, scheduledHour: hour, scheduledMinute: minute } }
+}
+
+function validImage(bytes: Buffer | null): boolean {
+  if (bytes === null) return true
+  return bytes.length <= IMAGE_LIMIT && imageMime(bytes) !== null
+}
+
 export function createOutboxServer(deps: OutboxServerDeps): Server {
   const now = deps.now ?? (() => Date.now())
+  deps.db.prepare('DELETE FROM auth_pending WHERE createdAt <= ?').run(now() - 600_000)
   const brand = deps.brand
+  const upstream = (deps.dfxApiBaseUrl ?? '').replace(/\/$/, '')
+  const publicUrl = deps.outboxPublicUrl ?? ''
+  const backendFetch = deps.fetch ?? fetch
   const log = createLog(deps.log ?? ((line) => process.stdout.write(line + '\n')))
   const fontDirectory = join(dirname(fileURLToPath(import.meta.url)), 'assets', 'fonts')
   const fontNames = new Set(
@@ -303,6 +380,10 @@ export function createOutboxServer(deps: OutboxServerDeps): Server {
     detail: string,
     extra: Record<string, unknown> = {}
   ): void {
+    if (status === 401 && req.method === 'GET' && !wantsJson(req, pathname)) {
+      send(res, 302, '', { location: '/login' })
+      return
+    }
     if (wantsJson(req, pathname)) {
       sendJson(res, status, { ok: false, reason, detail, ...extra })
       return
@@ -315,12 +396,123 @@ export function createOutboxServer(deps: OutboxServerDeps): Server {
     const url = new URL(req.url ?? '/', `http://${host}`)
     const pathname = url.pathname
     const method = req.method ?? 'GET'
-    const authHeader = headerString(req.headers.authorization)
-    const cookieHeaderValue = headerString(req.headers.cookie)
-    const logParts = [`${method} ${pathname}`]
-    if (authHeader) logParts.push(`Authorization: ${authHeader}`)
-    if (cookieHeaderValue) logParts.push(`Cookie: ${cookieHeaderValue}`)
-    log(logParts.join(' '))
+    log(`${method} ${pathname}`)
+
+    const redirect = (path: string, cookie?: string) => send(res, 302, '', { location: path, ...(cookie ? { 'set-cookie': cookie } : {}) })
+    const pendingCookie = (id: string, maxAge = 600) => `outbox_pending=${encodeURIComponent(id)}; Path=/auth; Max-Age=${maxAge}; HttpOnly; SameSite=Lax${publicUrl.startsWith('https:') ? '; Secure' : ''}`
+    const pending = () => {
+      deps.db.prepare('DELETE FROM auth_pending WHERE createdAt <= ?').run(now() - 600_000)
+      const id = readCookie(req, 'outbox_pending')
+      if (!id) return null
+      return deps.db.prepare('SELECT id, token FROM auth_pending WHERE id = ?').get(id) as { id: string; token: string } | undefined ?? null
+    }
+    const upstreamRequest = (path: string, init: RequestInit = {}) => backendFetch(`${upstream}${path}`, { ...init, redirect: 'manual', signal: AbortSignal.timeout(5_000) })
+    const finishPending = async (item: { id: string; token: string }) => {
+      const result = await deps.introspect(item.token, 'OUTBOX')
+      if (!result.ok || !hasRoleAccess('OUTBOX', result.role)) {
+        const denied = result.ok || result.status === 401 || result.status === 403
+        if (!denied) {
+          sendHtml(res, 502, renderTfaPage({ error: 'Please try again.' }))
+          return
+        }
+        const detail = !result.ok && result.reason === 'staff-kyc-required' ? 'This account has no verified name. Ask an admin to complete it.' : 'Access denied.'
+        deps.db.prepare('DELETE FROM auth_pending WHERE id = ?').run(item.id)
+        send(res, 403, renderPlainPage('Sign-in not possible', detail), { 'content-type': 'text/html; charset=utf-8', 'set-cookie': pendingCookie('', 0) })
+        return
+      }
+      const deleted = deps.db.prepare('DELETE FROM auth_pending WHERE id = ? AND createdAt > ?').run(item.id, now() - 600_000)
+      if (deleted.changes !== 1) { sendHtml(res, 401, renderPlainPage('Sign-in not possible', 'Please sign in again.')); return }
+      send(res, 302, '', { location: '/', 'set-cookie': [sessionCookie(item.token), pendingCookie('', 0)] })
+    }
+
+    if (method === 'GET' && pathname === '/assets/login.js') {
+      send(res, 200, readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'assets', 'login.js')), { 'content-type': 'text/javascript; charset=utf-8' })
+      return
+    }
+    if (method === 'GET' && pathname === '/login') { sendHtml(res, 200, renderLoginPage()); return }
+    if (method === 'POST' && pathname.startsWith('/auth/') && !originMatchesHost(req)) {
+      if (wantsJson(req, pathname)) sendJson(res, 403, { ok: false, reason: 'origin-mismatch' })
+      else sendHtml(res, 403, renderPlainPage('Forbidden', 'Origin does not match this host.'))
+      return
+    }
+    if (method === 'POST' && pathname === '/auth/mail') {
+      const parsed = await parseFields(req)
+      if (!parsed.ok || !parsed.fields.mail) { sendHtml(res, 400, renderPlainPage('Sign-in not possible', 'Enter an email address.')); return }
+      try {
+        const response = await upstreamRequest('/v1/auth/mail', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ mail: parsed.fields.mail, redirectUri: `${publicUrl}/auth/callback` }) })
+        if (response.status !== 201) throw new Error('mail failed')
+        sendHtml(res, 200, renderPlainPage('Email sent', 'Open the link in the email to continue.'))
+      } catch { sendHtml(res, 502, renderPlainPage('Sign-in not possible', 'Please try again later.')) }
+      return
+    }
+    if (method === 'GET' && pathname === '/auth/callback') {
+      const token = url.searchParams.get('session') ?? ''
+      if (!deps.jwtSecret) { sendHtml(res, 503, renderPlainPage('Sign-in not possible', 'Sign-in is not configured.')); return }
+      const claims = decodeJwtHs256(token, deps.jwtSecret)
+      if (!claims || claims.tfaRequired !== true || !validJwtClaims(claims, now())) { sendHtml(res, 401, renderPlainPage('Sign-in not possible', 'Please sign in again.')); return }
+      deps.db.prepare('DELETE FROM auth_pending WHERE createdAt <= ?').run(now() - 600_000)
+      const id = randomBytes(32).toString('hex')
+      deps.db.prepare('INSERT INTO auth_pending (id, token, createdAt) VALUES (?, ?, ?)').run(id, token, now())
+      redirect('/auth/tfa', pendingCookie(id))
+      return
+    }
+    if (pathname === '/auth/tfa' && (method === 'GET' || method === 'POST')) {
+      const item = pending()
+      if (!item) { redirect('/login', pendingCookie('', 0)); return }
+      try {
+        const headers = { authorization: `Bearer ${item.token}` }
+        if (method === 'POST') {
+          const parsed = await parseFields(req)
+          const code = parsed.ok ? parsed.fields.code ?? '' : ''
+          if (!/^[0-9]{6}$/.test(code)) { sendHtml(res, 400, renderTfaPage({ error: 'Enter a six-digit code.' })); return }
+          const verified = await upstreamRequest('/v1/auth/2fa/verify', { method: 'POST', headers: { ...headers, 'content-type': 'application/json' }, body: JSON.stringify({ token: code }) })
+          if (verified.status !== 201) { sendHtml(res, 400, renderTfaPage({ error: 'Invalid code. Please try again.' })); return }
+          await finishPending(item)
+          return
+        }
+        const setup = await upstreamRequest('/v1/auth/2fa?level=Strict', { method: 'POST', headers })
+        if (setup.status === 409) { sendHtml(res, 200, renderTfaPage()); return }
+        if (setup.status === 201) {
+          const body = await setup.json() as { secret?: unknown; uri?: unknown }
+          if (typeof body.secret === 'string' && typeof body.uri === 'string') { sendHtml(res, 200, renderTfaPage({ secret: body.secret, uri: body.uri })); return }
+        }
+        sendHtml(res, 502, renderPlainPage('Sign-in not possible', 'Please try again later.'))
+      } catch { sendHtml(res, 502, renderPlainPage('Sign-in not possible', 'Please try again later.')) }
+      return
+    }
+    if (method === 'GET' && pathname === '/auth/wallet/message') {
+      const address = url.searchParams.get('address') ?? ''
+      if (!address) { sendJson(res, 400, { ok: false }); return }
+      try {
+        const response = await upstreamRequest(`/v1/auth/signMessage?address=${encodeURIComponent(address)}`)
+        const body = await response.json() as { message?: unknown }
+        if (response.status !== 200 || typeof body.message !== 'string') throw new Error('invalid message')
+        sendJson(res, 200, { message: body.message })
+      } catch { sendJson(res, 502, { ok: false }); }
+      return
+    }
+    if (method === 'POST' && (pathname === '/auth/wallet' || pathname === '/auth/callback')) {
+      const parsed = await parseFields(req)
+      if (!parsed.ok) { sendJson(res, 400, { ok: false }); return }
+      try {
+        let token = parsed.fields.accessToken ?? ''
+        if (pathname === '/auth/wallet') {
+          if (!parsed.fields.address || !parsed.fields.signature) { sendJson(res, 400, { ok: false }); return }
+          const response = await upstreamRequest('/v1/auth/signIn', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ address: parsed.fields.address, signature: parsed.fields.signature }) })
+          const body = await response.json() as { accessToken?: unknown }
+          if (response.status !== 201 || typeof body.accessToken !== 'string') throw new Error('sign in failed')
+          token = body.accessToken
+        }
+        if (!token) { sendJson(res, 400, { ok: false }); return }
+        let result = await deps.introspect(token, 'ADMIN')
+        if (result.ok && !hasRoleAccess('ADMIN', result.role)) result = { ok: false, status: 403 }
+        if (!result.ok && result.status === 403 && pathname === '/auth/callback') result = await deps.introspect(token, 'OUTBOX')
+        if (!result.ok || !hasRoleAccess('OUTBOX', result.role)) { sendJson(res, result.ok ? 403 : result.status, { ok: false }); return }
+        send(res, 200, JSON.stringify({ ok: true }), { 'content-type': 'application/json; charset=utf-8', 'set-cookie': sessionCookie(token) })
+      } catch { sendJson(res, 502, { ok: false }); }
+      return
+    }
+    if (method === 'POST' && pathname === '/auth/logout') { redirect('/login', `${COOKIE_NAME}=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Strict`); return }
 
     const fontRoute = /^\/assets\/fonts\/([^/]+)$/.exec(pathname)
     if (method === 'GET' && fontRoute && fontNames.has(fontRoute[1]!)) {
@@ -328,6 +520,12 @@ export function createOutboxServer(deps: OutboxServerDeps): Server {
         'content-type': 'font/woff2',
         'cache-control': 'public, max-age=31536000, immutable'
       })
+      return
+    }
+
+    if (method === 'GET' && pathname === '/assets/composer.js') {
+      const assetPath = join(dirname(fileURLToPath(import.meta.url)), 'assets', 'composer.js')
+      send(res, 200, readFileSync(assetPath), { 'content-type': 'text/javascript; charset=utf-8' })
       return
     }
 
@@ -351,16 +549,64 @@ export function createOutboxServer(deps: OutboxServerDeps): Server {
         fail(res, req, pathname, auth.status, 'auth-failed', 'Sign in required.')
         return
       }
+      const slot = nextSlotZurich(now())
       sendHtml(
         res,
         200,
         renderComposerPage({
           text: '',
-          scheduledAt: '',
+          scheduledDate: slot.date,
+          scheduledHour: slot.hour,
+          scheduledMinute: slot.minute,
           charCount: 0,
           costHint: costHint('')
         })
       )
+      return
+    }
+
+    if (method === 'GET' && pathname === '/posts') {
+      const auth = await authenticate(req, 'OUTBOX')
+      if (!auth.ok) {
+        fail(res, req, pathname, auth.status, 'auth-failed', 'Sign in required.')
+        return
+      }
+      const rows = [...listEntries(deps.db, auth.identity.role === 'ADMIN' ? null : auth.identity.account)].reverse()
+      sendHtml(res, 200, renderPostsPage({
+        author: auth.identity.role !== 'ADMIN',
+        posts: rows.map((row) => ({
+          bundleId: row.bundleId,
+          state: row.state,
+          text: row.text,
+          scheduledLabel: formatZurich(row.scheduledAt),
+          channel: row.postId === null ? null : { postId: row.postId, status: row.channelStatus!, url: row.postUrl },
+          imageSha256: row.imageSha256,
+          decisionComment: row.decisionComment,
+          authorMessage: authorStatusMessage(row.state, row.channelStatus)
+        }))
+      }))
+      return
+    }
+
+    const mediaMatch = /^\/media\/([a-f0-9]{64})$/.exec(pathname)
+    if (method === 'GET' && mediaMatch) {
+      const auth = await authenticate(req, 'OUTBOX')
+      if (!auth.ok) {
+        fail(res, req, pathname, auth.status, 'auth-failed', 'Sign in required.')
+        return
+      }
+      const sha256 = mediaMatch[1]!
+      const references = deps.db.prepare(`${ENTRY_VIEW_SQL} WHERE e.imageSha256 = ?`).all(sha256) as EntryView[]
+      if (!references.some((row) => isVisible(auth.identity, row))) {
+        sendJson(res, 404, { ok: false, reason: 'not-found', detail: 'Not found.' })
+        return
+      }
+      const media = deps.db.prepare('SELECT mime, bytes FROM media WHERE sha256 = ?').get(sha256) as { mime: string; bytes: Buffer } | undefined
+      if (!media) {
+        sendJson(res, 404, { ok: false, reason: 'not-found', detail: 'Not found.' })
+        return
+      }
+      send(res, 200, media.bytes, { 'content-type': media.mime, 'x-content-type-options': 'nosniff', 'cache-control': 'private, no-store' })
       return
     }
 
@@ -400,6 +646,7 @@ export function createOutboxServer(deps: OutboxServerDeps): Server {
           state: row.state,
           text: row.text,
           scheduledAt: row.scheduledAt,
+          decisionComment: row.decisionComment,
           authoredByAccount: row.authoredByAccount,
           channel
         }
@@ -451,7 +698,10 @@ export function createOutboxServer(deps: OutboxServerDeps): Server {
                 channel: row.channel!,
                 status: row.channelStatus!,
                 url: row.postUrl
-              }
+              },
+          imageSha256: row.imageSha256,
+          decisionComment: row.decisionComment,
+          authorMessage: authorStatusMessage(row.state, row.channelStatus)
         })
       )
       return
@@ -487,7 +737,7 @@ export function createOutboxServer(deps: OutboxServerDeps): Server {
     const auth = await authenticate(req, neededRole)
     if (!auth.ok) {
       await readBody(req)
-      fail(res, req, pathname, auth.status, 'auth-failed', 'Not allowed.')
+      fail(res, req, pathname, auth.status, 'auth-failed', auth.status === 401 ? 'Sign in required.' : 'Not allowed.')
       return
     }
     if (auth.via === 'cookie' && !originMatchesHost(req)) {
@@ -503,11 +753,7 @@ export function createOutboxServer(deps: OutboxServerDeps): Server {
         return
       }
       const text = parsed.fields.text ?? ''
-      if (text.trim() === '') {
-        fail(res, req, pathname, 400, 'invalid-request', 'Text is required.')
-        return
-      }
-      const reviewed = reviewText(deps.packRoot, brand, text)
+      const reviewed = reviewText(deps.packRoot, brand, text, deps.xMaxWeightedLength)
       if (!reviewed.ok) {
         sendJson(res, 409, { ok: false, reason: 'missing-pack', detail: 'Review pack is missing.' })
         return
@@ -515,7 +761,8 @@ export function createOutboxServer(deps: OutboxServerDeps): Server {
       sendJson(res, 200, {
         ok: true,
         blocking: reviewed.checks.blocking,
-        hints: reviewed.checks.hints ?? []
+        charCount: characterCount(text),
+        costHint: costHint(text)
       })
       return
     }
@@ -527,18 +774,41 @@ export function createOutboxServer(deps: OutboxServerDeps): Server {
         return
       }
       const text = parsed.fields.text ?? ''
-      const scheduledRaw = parsed.fields.scheduledAt ?? ''
+      const timeInput = scheduledInput(parsed.fields)
+      const timeFields = timeInput?.values ?? {
+        scheduledDate: parsed.fields.scheduledDate ?? parsed.fields.scheduledAt?.slice(0, 10) ?? '',
+        scheduledHour: parsed.fields.scheduledHour ?? parsed.fields.scheduledAt?.slice(11, 13) ?? '',
+        scheduledMinute: parsed.fields.scheduledMinute ?? parsed.fields.scheduledAt?.slice(14, 16) ?? ''
+      }
       if (text.trim() === '') {
-        fail(res, req, pathname, 400, 'invalid-request', 'Text is required.')
+        const detail = 'Text is required.'
+        if (wantsJson(req, pathname)) fail(res, req, pathname, 400, 'invalid-request', detail)
+        else sendHtml(res, 400, renderComposerPage({ text, ...timeFields, imageDropped: parsed.imageBytes !== null, error: detail, charCount: 0, costHint: costHint(text) }))
         return
       }
-      const scheduledAt = parseZurichDateTime(scheduledRaw)
+      const scheduledAt = timeInput ? parseZurichDateTime(timeInput.raw) : null
       if (scheduledAt === null) {
-        fail(res, req, pathname, 400, 'invalid-request', 'scheduledAt must be datetime-local in Europe/Zurich.')
+        const detail = 'Provide a valid scheduled time in Europe/Zurich.'
+        if (wantsJson(req, pathname)) fail(res, req, pathname, 400, 'invalid-request', detail)
+        else sendHtml(res, 400, renderComposerPage({ text, ...timeFields, imageDropped: parsed.imageBytes !== null, error: detail, charCount: characterCount(text), costHint: costHint(text) }))
+        return
+      }
+      if (scheduledAt % 60_000 !== 0 || Number(timeInput!.values.scheduledMinute) % 5 !== 0) {
+        const detail = 'Scheduled time must be on a 5-minute step.'
+        if (wantsJson(req, pathname)) fail(res, req, pathname, 400, 'invalid-request', detail)
+        else sendHtml(res, 400, renderComposerPage({ text, ...timeFields, imageDropped: parsed.imageBytes !== null, error: detail, charCount: characterCount(text), costHint: costHint(text) }))
+        return
+      }
+      if (!validImage(parsed.imageBytes)) {
+        if (wantsJson(req, pathname)) {
+          sendJson(res, 409, { ok: false, reason: 'bad-image', detail: 'Image must be a PNG or JPEG up to 5 MB.' })
+        } else {
+          sendHtml(res, 409, renderComposerPage({ text, ...timeFields, imageDropped: parsed.imageBytes !== null, error: 'Image must be a PNG or JPEG up to 5 MB.', charCount: characterCount(text), costHint: costHint(text) }))
+        }
         return
       }
 
-      const reviewed = reviewText(deps.packRoot, brand, text)
+      const reviewed = reviewText(deps.packRoot, brand, text, deps.xMaxWeightedLength)
       if (!reviewed.ok) {
         writeAudit(deps.db, {
           at: now(),
@@ -558,7 +828,8 @@ export function createOutboxServer(deps: OutboxServerDeps): Server {
           409,
           renderComposerPage({
             text,
-            scheduledAt: scheduledRaw,
+            ...timeFields,
+            imageDropped: parsed.imageBytes !== null,
             error: 'Review pack is missing.',
             recorded: null,
             charCount: characterCount(text),
@@ -581,8 +852,7 @@ export function createOutboxServer(deps: OutboxServerDeps): Server {
           sendJson(res, 409, {
             ok: false,
             reason: 'blocking-review',
-            blocking: reviewed.checks.blocking,
-            hints: reviewed.checks.hints ?? []
+            blocking: reviewed.checks.blocking
           })
           return
         }
@@ -591,7 +861,8 @@ export function createOutboxServer(deps: OutboxServerDeps): Server {
           409,
           renderComposerPage({
             text,
-            scheduledAt: scheduledRaw,
+            ...timeFields,
+            imageDropped: parsed.imageBytes !== null,
             error: 'Blocking review finding.',
             recorded: reviewed.checks,
             charCount: characterCount(text),
@@ -605,6 +876,7 @@ export function createOutboxServer(deps: OutboxServerDeps): Server {
         text,
         scheduledAt,
         checks: reviewed.checks,
+        imageBytes: parsed.imageBytes,
         actor: { user: auth.identity.user, account: auth.identity.account },
         now: now()
       })
@@ -619,7 +891,8 @@ export function createOutboxServer(deps: OutboxServerDeps): Server {
           409,
           renderComposerPage({
             text,
-            scheduledAt: scheduledRaw,
+            ...timeFields,
+            imageDropped: parsed.imageBytes !== null,
             error: detail,
             recorded: reviewed.checks,
             charCount: characterCount(text),
@@ -682,6 +955,12 @@ export function createOutboxServer(deps: OutboxServerDeps): Server {
         fail(res, req, pathname, 400, 'invalid-request', 'decision must be approve or reject.')
         return
       }
+      const rawComment = parsed.fields.comment
+      const comment = rawComment?.trim() || null
+      if (comment !== null && [...comment].length > 1000) {
+        fail(res, req, pathname, 400, 'invalid-request', 'Comment must be at most 1000 characters.')
+        return
+      }
       const rows = deps.db
         .prepare(`${ENTRY_VIEW_SQL} WHERE e.bundleId = ?`)
         .all(bundleId) as EntryView[]
@@ -697,6 +976,7 @@ export function createOutboxServer(deps: OutboxServerDeps): Server {
       const result = decideEntry(deps.db, {
         entryId: row.id,
         decision,
+        comment,
         actor: { user: auth.identity.user, account: auth.identity.account },
         now: now()
       })

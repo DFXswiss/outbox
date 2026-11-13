@@ -13,29 +13,30 @@ export const AUDIT_EVENTS = [
 ] as const
 export type AuditEvent = (typeof AUDIT_EVENTS)[number]
 
-export const SYSTEM_ACTOR = { user: 'system', account: 'system' } as const
+export const SYSTEM_ACTOR = { user: null, account: null } as const
 
 export type AuditRecord = {
   at: number
   event: AuditEvent
   bundleId: string | null
   entryId: string | null
-  actorUser: string
-  actorAccount: string
+  actorUser: number | null
+  actorAccount: number | null
   reason: string | null
 }
 
 /** Identity is JWT user/account, passed in — never a typed address. */
 export function writeAudit(db: SqliteDatabase, record: AuditRecord): void {
   db.prepare(
-    `INSERT INTO audit (id, at, event, bundleId, entryId, actorUser, actorAccount, reason)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+    `INSERT INTO audit (id, at, event, bundleId, entryId, actorKind, actorUser, actorAccount, reason)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(
     randomUUID(),
     record.at,
     record.event,
     record.bundleId,
     record.entryId,
+    record.actorUser === null && record.actorAccount === null ? 'system' : 'user',
     record.actorUser,
     record.actorAccount,
     record.reason

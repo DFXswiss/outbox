@@ -7,3 +7,4 @@ coverage
 content/*/rules.json
 .env
 .env.*
+e2e-run.json

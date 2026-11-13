@@ -3,7 +3,7 @@ import { existsSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, renameS
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { buildHandbook, discoverCaptureInputs, discoverHandbook, findScreenshotPairErrors, readPngDimensions, registerOutputDestination, resolveOutputDirectory, verifyReferences, MIN_SCREENSHOTS } from './build'
+import { buildHandbook, discoverCaptureInputs, discoverHandbook, findScreenshotPairErrors, readPngDimensions, registerOutputDestination, resolveOutputDirectory, verifyReferences, MIN_GROUPS, MIN_SCREENSHOTS } from './build'
 
 const roots: string[] = []
 
@@ -59,13 +59,13 @@ function captureRepo(root: string): string {
 
 function writeDiscoveryFixture(root: string, screenshotCount: number): string {
   const screenshots = join(root, 'screenshots')
-  for (let index = 0; index < 4; index += 1) {
+  for (let index = 0; index < MIN_GROUPS; index += 1) {
     const group = join(screenshots, `chapter-${index}`)
     mkdirSync(group, { recursive: true })
     writeFileSync(join(group, '_group.md'), `# Chapter ${index}\n`)
   }
   for (let index = 0; index < screenshotCount; index += 1) {
-    const group = join(screenshots, `chapter-${index % 4}`)
+    const group = join(screenshots, `chapter-${index % MIN_GROUPS}`)
     const name = `${String(index).padStart(2, '0')}-page`
     writeFileSync(join(group, `${name}.png`), png())
     writeFileSync(join(group, `${name}.md`), `# Page ${index}\n`)

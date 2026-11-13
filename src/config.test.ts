@@ -2,6 +2,15 @@ import { describe, expect, it } from 'vitest'
 import { loadConfig } from './config'
 
 describe('loadConfig', () => {
+  it.each(['0', '-1', '1.5'])('rejects an invalid weighted length %s', (limit) => {
+    const result = loadConfig({ DB_PATH: '/tmp/outbox.sqlite', BRAND: 'test', DFX_API_BASE_URL: 'https://identity.invalid', OUTBOX_PUBLIC_URL: 'https://outbox.invalid', X_CLIENT_ID: 'client', X_HANDLE: 'handle', X_MAX_WEIGHTED_LENGTH: limit })
+    expect(result).toMatchObject({ ok: false, variables: expect.arrayContaining(['X_MAX_WEIGHTED_LENGTH']) })
+  })
+
+  it('requires a public URL without a trailing slash', () => {
+    const result = loadConfig({ DB_PATH: '/tmp/outbox.sqlite', BRAND: 'test', DFX_API_BASE_URL: 'https://identity.invalid', OUTBOX_PUBLIC_URL: 'https://outbox.invalid/', X_CLIENT_ID: 'client', X_HANDLE: 'handle' })
+    expect(result).toMatchObject({ ok: false, variables: expect.arrayContaining(['OUTBOX_PUBLIC_URL']) })
+  })
   it('reports missing required variable names without exposing values', () => {
     const result = loadConfig({
       X_CLIENT_SECRET: 'secret-value'
@@ -12,6 +21,7 @@ describe('loadConfig', () => {
         'DB_PATH',
         'BRAND',
         'DFX_API_BASE_URL',
+        'OUTBOX_PUBLIC_URL',
         'X_CLIENT_ID',
         'X_HANDLE'
       ])
@@ -24,6 +34,7 @@ describe('loadConfig', () => {
       DB_PATH: '/tmp/outbox.sqlite',
       BRAND: 'test-brand',
       DFX_API_BASE_URL: 'https://identity.invalid',
+      OUTBOX_PUBLIC_URL: 'https://outbox.invalid',
       X_CLIENT_ID: 'test-client',
       X_HANDLE: '@test_handle'
     } as NodeJS.ProcessEnv)
@@ -45,6 +56,7 @@ describe('loadConfig', () => {
       PACK_ROOT: '/tmp/sentinel-packs',
       BRAND: 'gifts',
       DFX_API_BASE_URL: 'https://identity.sentinel.invalid',
+      OUTBOX_PUBLIC_URL: 'https://outbox.sentinel.invalid',
       JWT_SECRET: 'jwt-sentinel',
       X_CLIENT_ID: 'client-id-sentinel',
       X_CLIENT_SECRET: 'client-secret-sentinel',
@@ -61,11 +73,13 @@ describe('loadConfig', () => {
         packRoot: '/tmp/sentinel-packs',
         brand: 'gifts',
         dfxApiBaseUrl: 'https://identity.sentinel.invalid',
+        outboxPublicUrl: 'https://outbox.sentinel.invalid',
         jwtSecret: 'jwt-sentinel',
         xClientId: 'client-id-sentinel',
         xClientSecret: 'client-secret-sentinel',
         xRefreshToken: 'refresh-sentinel',
         xHandle: '@handle-sentinel',
+        xMaxWeightedLength: 25000,
         xApiBase: 'https://x-api.sentinel.invalid'
       }
     })

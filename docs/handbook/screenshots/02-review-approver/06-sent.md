@@ -1,3 +1,3 @@
 # Sent
 
-The page shows the `approved` chip and the X channel card with a `sent` chip. The review check card says “No blocking findings and no hints.” and shows the review scope. View published post opens the recorded X permalink. The composer can open this entry in the composer review view.
+The page shows the Outbox brand and New post and Posts navigation. The Review heading is followed by the `approved` chip, scheduled date and time, and “Published on X.” The preview shows the post text. The checks card says “No blocking findings.” The channel card shows Channel: x and the `sent` chip. View published post links to X.

@@ -1,3 +1,3 @@
 # Post returned to pending
 
-The page says Post updated and shows the `pending` status. Retry does not publish immediately. The publisher takes the post when it is due.
+The page shows the Outbox brand, a success icon, the heading “Post updated,” and the message “Post status: pending.”

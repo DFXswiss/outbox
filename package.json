@@ -7,17 +7,21 @@
   },
   "scripts": {
     "test": "vitest run",
+    "test:e2e": "node --import tsx scripts/e2e/run.ts",
     "typecheck": "tsc --noEmit",
     "start": "node --import tsx src/main.ts",
+    "x:authorize": "node --import tsx scripts/x-authorize.ts",
     "handbook:build": "node --import tsx scripts/handbook/build.ts",
     "handbook:gate": "node --import tsx scripts/handbook/content-gate.ts"
   },
   "dependencies": {
     "better-sqlite3": "^12.11.1",
+    "twitter-text": "3.1.0",
     "tsx": "4.20.3",
     "zod": "^3.24.2"
   },
   "devDependencies": {
+    "ethers": "6.13.5",
     "@types/better-sqlite3": "^9.6.0",
     "@types/node": "^22.15.3",
     "typescript": "^5.8.3",

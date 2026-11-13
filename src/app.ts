@@ -46,6 +46,10 @@ export function buildApp(config: AppConfig, deps: AppDeps): BuiltApp {
     db: deps.db,
     packRoot: config.packRoot,
     brand: config.brand,
+    dfxApiBaseUrl: config.dfxApiBaseUrl,
+    outboxPublicUrl: config.outboxPublicUrl,
+    xMaxWeightedLength: config.xMaxWeightedLength,
+    ...(deps.fetch ? { fetch: deps.fetch } : {}),
     jwtSecret: config.jwtSecret,
     introspect: createHttpIntrospect({
       baseUrl: config.dfxApiBaseUrl,

@@ -1,3 +1,3 @@
 # Review pack unavailable
 
-The composer form remains available, but submission stops because the service cannot find its review rules. The message says “Review pack is missing.” The checks card also shows “No usable review check is recorded.” and the review scope. No review entry is created.
+The page shows the Outbox brand and New post and Posts navigation. The form retains “We will share the revised opening hours tomorrow morning.” and a scheduled date, hour, and five-minute minute in Europe/Zurich. The image field shows the “Choose File” button and “No file chosen”. A cross icon precedes “Review pack is missing.” The preview repeats the text, character count, and cost hint and has no image symbol. The live checks card is empty, and the note says “Check unavailable — it runs again on submit.”

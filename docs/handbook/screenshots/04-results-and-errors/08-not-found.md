@@ -1,3 +1,3 @@
 # Request failed: not found
 
-The page says Request failed and Not found. The requested review entry does not exist. Check the entry address before trying again.
+The page shows the Outbox brand, an error icon, the heading “Request failed,” and the message “Not found.”

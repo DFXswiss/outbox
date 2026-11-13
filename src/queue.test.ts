@@ -14,8 +14,8 @@ import {
 
 const NOW = 1_700_000_000_000
 const SETUP_NOW = NOW - 60_000
-const ACTOR = { user: 'author', account: 'account' }
-const ADMIN = { user: 'admin', account: 'admin-account' }
+const ACTOR = { user: 1, account: 1 }
+const ADMIN = { user: 2, account: 2 }
 let dir: string
 let db: SqliteDatabase
 
@@ -42,6 +42,7 @@ function approved(scheduledAt = NOW + 1) {
   const decision = decideEntry(db, {
     entryId: submitted.entryId,
     decision: 'approve',
+    comment: null,
     actor: ADMIN,
     now: SETUP_NOW
   })

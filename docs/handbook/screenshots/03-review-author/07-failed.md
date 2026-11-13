@@ -1,3 +1,3 @@
 # Failed
 
-The page shows the `approved` chip and the X channel card with a `failed` chip. The review check card says “No blocking findings and no hints.” and shows the review scope. There is no retry control in the composer view. An approver can retry the post.
+The page shows the Outbox brand and New post and Posts navigation. The Review heading is followed by the `approved` chip, scheduled date and time, and “Sending failed. An approver can retry.” The preview shows the post text. The checks card says “No blocking findings.” The channel card shows Channel: x and the `failed` chip. No decision buttons are shown.

@@ -1,3 +1,3 @@
 # Forbidden origin
 
-The page says Forbidden because the request origin does not match the service host. Submit the form from the service page so the browser sends a matching origin.
+The page shows the Outbox brand, an error icon, the heading “Forbidden,” and the message “Origin does not match this host.”

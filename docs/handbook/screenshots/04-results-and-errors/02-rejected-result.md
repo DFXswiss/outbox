@@ -1,3 +1,3 @@
 # Decision result: rejected
 
-The page says the entry was rejected. A rejected post is not added to the queue.
+The page shows the Outbox brand, a success icon, the heading “Decided,” and the message “Rejected.”

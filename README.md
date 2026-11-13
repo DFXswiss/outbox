@@ -11,7 +11,7 @@ This repository is the Outbox **application**. Deployment config lives in the in
 ## Goals
 
 1. Phase 1: publish to **X** through the official API (OAuth 2.0) for **one** brand, with a real post as proof.
-2. Login is the existing DFX JWT (`api.dfx.swiss`). Compose/submit requires `hasRoleAccess(OUTBOX, payload.role)` — the user's own `UserRole.OUTBOX`, or Admin/SuperAdmin via additionalRoles. Grant Outbox like Support: set `User.role` on the user of the target userData. Approve requires `UserRole.ADMIN`.
+2. Login is the existing DFX JWT (`api.dfx.swiss`). `Outbox` maps to `OUTBOX`, and `Admin`/`SuperAdmin` map to `ADMIN`; compose/submit requires `hasRoleAccess(OUTBOX, mappedRole)`, including Admin via additionalRoles. Grant Outbox like Support: set `User.role` on the user of the target userData. Approve requires `UserRole.ADMIN`.
 3. Approval is the only insert into the send queue. GET never mutates.
 4. Outcomes `sent` | `failed` | `uncertain`. `uncertain` is never auto-retried. Approvers retry `failed` and resolve `uncertain`.
 5. No LLM. Content packs (`facts-sheet.md`, `voice-guide.md`, `rules.json`) are deterministic checks.
@@ -33,8 +33,8 @@ Identity is the **existing DFX JWT** (HS256), not Cloudflare Access and not an e
 
 | Actor | How they sign in | Role |
 |---|---|---|
-| Composer | DFX mail login (magic link) then existing DFX TOTP UI | `UserRole.OUTBOX` |
-| Approver | Wallet `POST /v1/auth/signIn` (JSON `{ accessToken }`) | `UserRole.ADMIN` / `SUPER_ADMIN` |
+| Composer | DFX mail login (magic link), then TOTP in Outbox | `Outbox` |
+| Approver | Wallet sign-in | `Admin` / `SuperAdmin` |
 
 Mail login does **not** elevate Admin. Approvers stay on wallet sign-in.
 
@@ -42,24 +42,24 @@ Mail login does **not** elevate Admin. Approvers stay on wallet sign-in.
 
 **Composer login**
 
-1. Magic link mints a staff JWT with `tfaRequired` and redirects to Outbox `/auth/callback?session=<jwt>`.
-2. Callback does **not** set a working cookie. It 302s to the existing DFX TOTP UI with `session` and `returnUrl` of Outbox `/auth/tfa-complete`. Both URLs must be on the DFX API redirect allowlist.
-3. TOTP UI calls `GET`/`POST /v1/auth/2fa` and `POST /v1/auth/2fa/verify`. Outbox does not rebuild TOTP.
-4. After success, TOTP UI 302s to `/auth/tfa-complete?session=<jwt>`. Outbox calls `GET /v1/auth/introspect/outbox` with Bearer. Introspect **200** means the DFX TFA interceptor already accepted completed TOTP — claim presence alone is not enough. Pre-verify magic-link JWTs get **403** `tfaRequired` and no working cookie. After 200: HttpOnly working cookie, query stripped. Staff KYC failure (`verifiedName` missing) → hard error, **not** the TOTP UI.
+1. Outbox requests `POST /v1/auth/mail` with a redirect URI pointing to its callback. The mail opens the DFX mail-login page, which calls `GET /v1/auth/mail/redirect?code=…`; its 200 JSON `redirectUrl` is opened by the page.
+2. The callback receives a staff JWT with `tfaRequired`, stores it in a ten-minute pending session, and redirects to `/auth/tfa` without the JWT in the URL. It does not set a working cookie yet.
+3. Every sign-in asks for the current authenticator code. A recent sign-in does not skip this step. Outbox requests `POST /v1/auth/2fa?level=Strict`. A 201 shows the new secret and URI for enrollment. A 409 means the authenticator is already set up and shows only the code field.
+4. Outbox calls `POST /v1/auth/2fa/verify` itself because DFX binds the proof to the caller's IP address. Outbox then calls `GET /v1/auth/introspect/outbox`. The working cookie is issued only after verify returns 201 and introspect returns 200. If introspect returns a server error, the pending session stays and the page says "Please try again." Missing verified staff name is a hard error.
 
 **Approver login**
 
-Wallet `POST /v1/auth/signIn` against the DFX API (`DFX_API_BASE_URL`). Body `accessToken` goes to Outbox `POST /auth/callback`. Outbox checks `GET /v1/auth/introspect/admin` → 200, then sets the same HttpOnly cookie.
+Outbox requests `GET /v1/auth/signMessage`, has the browser wallet sign it, and sends the address and signature to `POST /v1/auth/signIn`. The 201 response contains `accessToken`; Outbox checks `GET /v1/auth/introspect/admin` before issuing the working cookie. API clients may submit an access token to `POST /auth/callback`, which tries admin introspection and then outbox on 403. API clients that `POST /auth/wallet` or `POST /auth/callback` must send an `Origin` whose host matches the Outbox host.
 
 Browser/SSR uses the cookie. Outbox always sends `Authorization: Bearer` to the DFX API. API routes accept cookie **or** Bearer.
 
 **Checks inside Outbox**
 
-- Verify HS256 with the **same JWT secret** as the DFX API. Mail-elevated staff tokens include `address`. Account tokens do not; they are not enough. Copy the default JWT validate branch (`address && user && account`). Outbox users need a wallet, like Support.
-- `hasRoleAccess(entryRole, payload.role)` with the DFX hierarchy. Compose/submit/retract: `OUTBOX` (retract also `authoredBy`; Outbox introspect). Decide/retry/resolve: `ADMIN` (Admin introspect). Retract is **not** Admin-only. Admin/SuperAdmin may compose via additionalRoles.
+- When `JWT_SECRET` is set, verify HS256 with the **same JWT secret** as the DFX API and check claims including `address` and `exp`. Mail-elevated staff tokens include `address`. Account tokens do not; they are not enough. A token is accepted only when `address` is a non-empty string, `user` and `account` are positive integers, and `exp` is a number that has not expired. Outbox users need a wallet, like Support. Without `JWT_SECRET`, mail login is disabled and `/healthz` reports the `jwt` probe as bad.
+- Only the roles `Outbox`, `Admin`, and `SuperAdmin` are accepted. `Outbox` maps to `OUTBOX`; `Admin` and `SuperAdmin` map to `ADMIN`. `hasRoleAccess` receives that mapped role. Compose/submit/retract: `OUTBOX` (retract also `authoredBy`; Outbox introspect). Decide/retry/resolve: `ADMIN` (Admin introspect). Retract is **not** Admin-only. Admin/SuperAdmin may compose via additionalRoles.
 - Audit uses JWT `user` and `account`, never a typed email.
 - Introspect **every** authenticated route (HTML GET, API, mutations).
-  - `GET /v1/auth/introspect/outbox`: `RoleGuard(OUTBOX)` (Admin via additionalRoles). If `payload.role === OUTBOX`: mail-origin claim `tfaRequired` **and** the DFX TFA interceptor must have passed (completed TOTP). Wallet-Outbox tokens → 403. A pre-verify magic-link JWT still carries the claim but introspect stays 403 until `2fa/verify`. Admin/SuperAdmin on this route without that claim is allowed.
+  - `GET /v1/auth/introspect/outbox`: `RoleGuard(OUTBOX)` (Admin via additionalRoles). If `payload.role === 'Outbox'`: mail-origin claim `tfaRequired` **and** the DFX TFA interceptor must have passed (completed TOTP). Wallet-Outbox tokens → 403. A pre-verify magic-link JWT still carries the claim but introspect stays 403 until `2fa/verify`. Admin/SuperAdmin on this route without that claim is allowed.
   - `GET /v1/auth/introspect/admin`: `RoleGuard(ADMIN)`, no `tfaRequired`. Never run dual-visibility GETs through the admin introspect (composers would 403).
 - Health endpoints have no JWT.
 
@@ -82,7 +82,8 @@ Node 22, no frontend bundler. SQLite WAL on durable storage.
 
 ### Composer (phase 1)
 
-- Plaintext, one PNG/JPEG ≤ 5 MiB, `datetime-local` as **Europe/Zurich** wall time (server parses IANA `Europe/Zurich`, not the browser zone).
+- Plaintext, one optional PNG/JPEG ≤ 5 MiB, date plus hour and 5-minute minute choices as **Europe/Zurich** wall time (server parses IANA `Europe/Zurich`, not the browser zone).
+- The composer checks text as it is typed and shows a Posts overview for authors and approvers.
 - X only.
 - Preview: text, optional image, character count, X pay-per-use cost hint (post 0.015 USD, post with URL 0.200 USD).
 - Blocking review → submit 409.
@@ -105,24 +106,28 @@ sequenceDiagram
   participant API as DFX API
   participant Q as Admin
   participant X as api.x.com
-  P->>API: Mail login (redirectUri = Outbox callback)
-  API-->>P: 302 /auth/callback?session=JWT
+  P->>B: POST /auth/mail
+  B->>API: POST /v1/auth/mail (redirectUri = Outbox callback)
+  API-->>P: Mail link opens DFX mail-login page
+  P->>API: GET /v1/auth/mail/redirect?code=...
+  API-->>P: 200 JSON redirectUrl; page navigates
   P->>B: GET /auth/callback?session=JWT
-  B-->>P: 302 DFX TOTP UI session + returnUrl
-  P->>API: GET/POST /v1/auth/2fa, POST /v1/auth/2fa/verify
-  API-->>P: 302 /auth/tfa-complete?session=JWT
-  P->>B: GET /auth/tfa-complete?session=JWT
+  B-->>P: Pending cookie; 302 /auth/tfa
+  B->>API: POST /v1/auth/2fa?level=Strict
+  P->>B: POST /auth/tfa (code)
+  B->>API: POST /v1/auth/2fa/verify
   B->>API: GET /v1/auth/introspect/outbox Bearer
   API-->>B: 200
   B-->>P: Set-Cookie, strip query
-  Q->>API: Wallet POST /v1/auth/signIn
-  API-->>Q: JSON accessToken
-  Q->>B: POST /auth/callback accessToken
+  Q->>B: Wallet signs message; POST /auth/wallet
+  B->>API: POST /v1/auth/signIn
+  API-->>B: 201 JSON accessToken
+  B->>API: GET /v1/auth/introspect/admin
   B-->>Q: Set-Cookie
   P->>B: POST /api/submit Cookie
   B->>API: GET /v1/auth/introspect/outbox Bearer
   B->>B: review rules.json; create bundle
-  Q->>B: POST /review/:id/decide {decision: approve or reject} Bearer
+  Q->>B: POST /review/:id/decide {decision: approve or reject, comment?} Bearer
   B->>API: GET /v1/auth/introspect/admin Bearer
   alt approve
     B->>B: CAS submitted to approved; queue in same tx
@@ -131,6 +136,10 @@ sequenceDiagram
   end
   opt queued and due
     Note over B,X: Ticker, never Decide
+    opt image attached
+      B->>X: POST /2/media/upload
+      X-->>B: media id or error (failed, no tweet)
+    end
     B->>X: POST /2/tweets OAuth
     X-->>B: id or error
     B->>B: sent / failed / uncertain
@@ -157,9 +166,10 @@ Channel status: `pending | in-flight | sent | failed | uncertain`. `PublishResul
 ### X (phase 1)
 
 - OAuth 2.0 user token against `api.x.com`.
-- Scopes: `tweet.write`, `users.read`, `offline.access`, plus media upload (`media.write` or the documented scope for chunked `POST /2/media/upload`).
-- `POST /2/tweets`; media chunked `POST /2/media/upload`; refresh `POST /2/oauth2/token`.
+- Scopes: `tweet.read`, `tweet.write`, `users.read`, `offline.access`, and `media.write` for media upload.
+- One-shot `POST /2/media/upload` (`media_category=tweet_image`) before `POST /2/tweets`; when `processing_info` is present, poll `GET /2/media/upload?command=STATUS` no sooner than one second later until `succeeded`. A `failed` or unknown state or deadline ends as `failed` before the tweet. Refresh uses `POST /2/oauth2/token`.
 - One refresh on HTTP 401, never a second. Failed refresh **after dispatch** (tweet call already sent) → CAS `in-flight → uncertain` plus `needs-login` alert, no loop. Failed refresh **before dispatch** → `failed` (retry allowed).
+- Any media upload failure occurs before the tweet request, so it is `failed` and no tweet request is sent.
 - No auto-retry after an accepted `POST /2/tweets`.
 - Boot probe: `GET /2/users/me` username, strip a leading `@` on **both** sides, compare to configured handle. Mismatch → `probes.x=bad`, no send.
 - Dev uses a **test** X account, not the brand account. Client id is config; client secret and refresh token are secrets.
@@ -168,7 +178,7 @@ Channel status: `pending | in-flight | sent | failed | uncertain`. `PublishResul
 
 Phase 1: **one** brand, X only: **21 gifts**. The brand slug is configuration (`BRAND`), the pack lives at `content/<brand>/` **in the image**. `rules.json` is not part of this repository; the build adds it from a private source. Missing `rules.json` → submit 409 and health `ok: false`.
 
-Blocking: forbidden claims, MiCAR-unsafe, provisional without qualifier. Hints: emoji, sentence length, X character count. No LLM. Pack updates = new image.
+Blocking: forbidden claims, MiCAR-unsafe wording, provisional parameters without a qualifier, and text over `X_MAX_WEIGHTED_LENGTH` (weighted length as X defines it). No LLM. Pack updates = new image.
 
 ---
 
@@ -180,18 +190,19 @@ Blocking: forbidden claims, MiCAR-unsafe, provisional without qualifier. Hints: 
 { "ok": bool, "queueRunning": bool, "probes": { "x": "ok"|"bad", "jwt": "ok"|"bad" } }
 ```
 
-`ok` is true only when every probe is ok. `x=bad`: no successful users/me probe yet (also while the service starts), the probe failed or the handle does not match, or a refresh needed a new login. `jwt=bad` only when the JWT secret is unset (not a drift detector).
+`ok` is true only when every probe is ok. `x=bad`: no successful users/me probe yet (also while the service starts), the probe failed or the handle does not match, a refresh needed a new login, or a rate limit reported by X has not expired (`x-rate-limit-reset`). While that rate limit has not expired, no further post is claimed. `jwt=bad` only when the JWT secret is unset (not a drift detector).
 
 | Route | Role | Effect |
 |---|---|---|
 | `GET /api/me` | OUTBOX or ADMIN | `{ account, user, role }` from payload |
-| `POST /api/drafts` | OUTBOX | text, image, scheduledAt (Zurich) |
 | `POST /api/review` | OUTBOX | findings |
 | `POST /api/submit` | OUTBOX | bundle; 409 on blocking / past time / bad image |
 | `GET /api/posts` | Admin → all; else Outbox → `authoredBy.account === payload.account`; else 403 | status list |
 | `POST /api/bundles/:id/retract` | OUTBOX, authoredBy | Phase 1: one entry per bundle. 409 unless every entry is `submitted`; then CAS all to `retracted` |
 | `GET /review/:id` | same visibility as `GET /api/posts` | `:id` is the **bundle** id. GET, no side effect; no token in the query |
-| `POST /review/:id/decide` | ADMIN | `:id` is the bundle id. Body `{ decision: "approve"\|"reject" }` for that bundle's single entry (phase 1). CAS `submitted → approved\|rejected`. Queue insert **only** on `approve`, same transaction. Retract vs decide: one winner. Repeat 409. |
+| `GET /posts` | OUTBOX or ADMIN | HTML status overview; authors see their own, approvers see all |
+| `GET /media/:sha256` | OUTBOX or ADMIN | Image bytes only when a visible entry references the image |
+| `POST /review/:id/decide` | ADMIN | `:id` is the bundle id. Body `{ decision: "approve"\|"reject", comment?: string }` for that bundle's single entry (phase 1). The optional comment is trimmed, limited to 1000 characters, stored as `decisionComment`, and shown to everyone who can see the entry on Review and Posts and in the JSON post views. CAS `submitted → approved\|rejected`. Queue insert **only** on `approve`, same transaction. Retract vs decide: one winner. Repeat 409. |
 | `POST /api/posts/:id/retry` | ADMIN | CAS `WHERE id=? AND status='failed'` → `pending`; unknown id 404, else 409 |
 | `POST /api/posts/:id/resolve-uncertain` | ADMIN | `{ resolution: "sent"\|"failed", url? }`. CAS `WHERE id=? AND status='uncertain'`; unknown id 404, else 409 |
 
@@ -214,26 +225,55 @@ Environment variables, read once at start. A missing or invalid required variabl
 | `PACK_ROOT` | no | `.` (image: `/app`) | Directory that **contains** `content/` |
 | `PORT` | no | `3000` | HTTP port |
 | `DFX_API_BASE_URL` | yes | — | DFX API for introspection |
+| `OUTBOX_PUBLIC_URL` | yes | — | Public Outbox URL without a trailing slash; used for the mail callback |
 | `JWT_SECRET` | no | — | Same HS256 secret as the DFX API; unset → health `jwt: bad` |
 | `X_CLIENT_ID` | yes | — | X OAuth 2.0 client id |
 | `X_CLIENT_SECRET` | no | — | Confidential clients only; sent as Basic auth on refresh |
 | `X_REFRESH_TOKEN` | no | — | Seed for the stored refresh token, see below |
 | `X_HANDLE` | yes | — | Account the boot probe expects (leading `@` optional) |
+| `X_MAX_WEIGHTED_LENGTH` | no | `25000` | Maximum X weighted length; set to `280` for accounts without Premium |
 | `X_API_BASE` | no | `https://api.x.com` | X API base |
+
+A database file from an unreleased earlier version is rejected. Start with a new database file.
 
 **Refresh token.** X refresh tokens are treated as single-use: every refresh stores the new pair in `x_credentials` before the access token is used. `X_REFRESH_TOKEN` only seeds that row. The same value on a later start changes nothing; a **different** value replaces the stored token. After a lost rotation (`needs-login` alert), authorize again, set the new refresh token, and restart.
 
+Create the initial token with `npm run x:authorize -- --env /path/to/x.env`. The file must have mode 600 and contain `X_CLIENT_ID`, `X_CLIENT_SECRET`, and `X_HANDLE`. The default path is `~/.config/outbox-e2e/x.env`; register `http://127.0.0.1:8765/callback` as the X OAuth callback.
+
 **Container.** The rule list `content/<brand>/rules.json` is not in this repository; the build places it in the context before `docker build`. A running publish has a 90 s budget, so the deployment needs a stop grace of at least 100 s.
+
+## End-to-end test
+
+The test starts Outbox as a process with a fresh database and uses a local DFX API plus a dedicated X test account. In a checkout of the DFX API containing the Outbox introspection endpoints, run `npm install`, `cp .env.local.example .env`, start PostgreSQL, and run `npm run setup`. Set `DFX_BACKEND_DIR` to that checkout. The harness reads its `.env` and `api.log`; keep both private. The database must be local and `psql` must be installed. `DFX_API_BASE_URL` defaults to `http://localhost:3000`.
+
+The browser-form station uses the handbook's isolated Playwright installation and Chromium. Install them with `npm install --prefix ./_handbook-deps --no-save playwright@1.61.1` and `./_handbook-deps/node_modules/.bin/playwright install chromium`. Missing Playwright or Chromium makes the run exit 3 before starting Outbox.
+
+Create an X test-account refresh token with `npm run x:authorize` and store `X_CLIENT_ID`, `X_CLIENT_SECRET`, `X_HANDLE`, and `X_REFRESH_TOKEN` in a mode-600 file. `OUTBOX_E2E_X_ENV` overrides the default `~/.config/outbox-e2e/x.env`. `OUTBOX_E2E_PORT` defaults to 8080. Run:
+
+```sh
+npm run test:e2e
+```
+
+Allow approximately 10–15 minutes for the five-minute publishing slots. Exit 0 means all stations passed; 1 means a station failed; 3 means a prerequisite or X account was missing. With only X missing the local sign-in, composition, approval and rejection stations still run, but publishing is not tested. `e2e-run.json` records the commits, dirty state, station results, and public URLs. The X refresh token is written back to the private environment file after the run, including failures.
+
+What is not real:
+
+- The DFX `/mail-login` page is not opened in a browser; its redirect API call is made directly, so a green run does not prove that page works.
+- The setup admin's missing verified name is set directly in local PostgreSQL; a green run does not prove the admin onboarding path supplies it.
+- The approver wallet signs with ethers rather than a browser wallet; a green run does not prove browser-wallet integration.
+- For resolve, a transport proxy drops one real X response after forwarding the request; a green run does not prove the production network will fail in the same way.
 
 ---
 
 ## Data model
 
-SQLite WAL. Tables: drafts, bundles, entries, scheduled_posts, publish_results, audit, media, x_credentials (the X OAuth token pair; the refresh token is stored at rest because it rotates).
+SQLite WAL. Tables: bundles, entries, scheduled_posts, publish_results, audit, media, x_credentials (the X OAuth token pair; the refresh token is stored at rest because it rotates). There is no `drafts` table.
 
-Phase 1: **one entry per bundle**. `GET`/`POST /review/:id` uses the bundle id.
+Pending mail sessions in `auth_pending` are unusable after ten minutes. Expired rows are deleted at the next login step or server restart; used rows are deleted immediately. Audit rows distinguish `actorKind = 'user'` with numeric JWT IDs from `actorKind = 'system'` with null IDs.
 
-Bundles and scheduled_posts store `authoredByUser` + `authoredByAccount` (JWT `user` / `account` at submit). Entry state: `submitted | retracted | approved | rejected`. Submit creates `submitted`. Retract/decide are compare-and-set `WHERE state='submitted'` in `BEGIN IMMEDIATE`. Retract 409 unless every entry on the bundle is still `submitted`. `approved` writes `scheduled_posts` with `status='pending'` and `channel='x'` in the same transaction. `decidedByUser` / `decidedByAccount` only on approve/reject.
+Phase 1: **one entry per bundle**. `GET`/`POST /review/:id` uses the bundle id. `media` stores deduplicated PNG/JPEG bytes by SHA-256.
+
+Bundles and scheduled_posts store `authoredByUser` + `authoredByAccount` (JWT `user` / `account` at submit). Entry state: `submitted | retracted | approved | rejected`. Submit creates `submitted`. Retract/decide are compare-and-set `WHERE state='submitted'` in `BEGIN IMMEDIATE`. Retract 409 unless every entry on the bundle is still `submitted`. `approved` writes `scheduled_posts` with `status='pending'` and `channel='x'` in the same transaction. `decidedByUser` / `decidedByAccount` and optional `decisionComment` are stored on approve/reject.
 
 ---
 
@@ -247,6 +287,7 @@ Bundles and scheduled_posts store `authoredByUser` + `authoredByAccount` (JWT `u
 | Publish without approval | no endpoint; no DOM control; tests |
 | Double post on X | no auto-retry after accepted tweet; retry only `failed`; `uncertain` not requeued |
 | Token in logs | denylist |
+| Cross-origin auth POST | Every `POST` under `/auth/`, including wallet and callback, requires an Origin or Referer host match. `Origin: null` is rejected. `Referrer-Policy: same-origin` keeps cross-origin referrers private while allowing same-origin forms. |
 
 ---
 
@@ -271,7 +312,7 @@ The operator handbook covers the composer, review states, and service responses.
 
 | PR | What |
 |---|---|
-| DFX API B1 | `UserRole.OUTBOX` in enum, `StaffRoles`, `KycGatedRoles`, `additionalRoles`, redirect allowlist for Outbox callback and tfa-complete |
+| DFX API B1 | `UserRole.OUTBOX` in enum, `StaffRoles`, `KycGatedRoles`, `additionalRoles`, redirect allowlist for the mail callback (`OUTBOX_PUBLIC_URL` + `/auth/callback`) |
 | DFX API B2 | `GET /v1/auth/introspect/outbox` and `/admin` |
 | A1 | Scaffold, `content/dfx/`, review engine, status types, CI |
 | A2 | SSR composer, cookie/Bearer = DFX JWT, submit/approve, **no** publish-now |

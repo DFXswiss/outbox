@@ -1,8 +1,11 @@
 import { describe, expect, it } from 'vitest'
 import {
+  escapeHtml,
   renderComposerPage,
   renderPlainPage,
-  renderReviewPage
+  renderReviewPage,
+  renderPostsPage,
+  truncatePostText
 } from './html'
 
 const review = (overrides: Partial<Parameters<typeof renderReviewPage>[0]> = {}) => renderReviewPage({
@@ -10,7 +13,7 @@ const review = (overrides: Partial<Parameters<typeof renderReviewPage>[0]> = {})
   text: 'A reviewed post.',
   scheduledLabel: '15 Jul 2024, 12:00',
   state: 'submitted',
-  recorded: { blocking: [], hints: [] },
+  recorded: { blocking: [] },
   lockReason: null,
   approver: true,
   channel: null,
@@ -18,6 +21,12 @@ const review = (overrides: Partial<Parameters<typeof renderReviewPage>[0]> = {})
 })
 
 describe('composer markup', () => {
+  it('renders the email sent result with a check rather than a cross', () => {
+    const html = renderPlainPage('Email sent', 'Open the link in the email to continue')
+    expect(html).toContain('class="result-icon success"')
+    expect(html).toContain('d="m5 12 4 4L19 6"')
+    expect(html).not.toContain('d="m6 6 12 12M18 6 6 18"')
+  })
   it('escapes every dynamic composer text field', () => {
     const value = "<x>&'"
     const escaped = '&lt;x&gt;&amp;&#39;'
@@ -27,7 +36,7 @@ describe('composer markup', () => {
       error: value,
       charCount: 1,
       costHint: value,
-      recorded: { blocking: [value], hints: [value] }
+      recorded: { blocking: [value] }
     })
     expect(html).not.toContain(value)
     expect(html).toContain(`<textarea id="text" name="text" required>${escaped}</textarea>`)
@@ -35,11 +44,11 @@ describe('composer markup', () => {
     expect(html).toContain(`<div class="callout error"><svg`)
     expect(html).toContain(`<p>${escaped}</p>`)
     expect(html).toContain(`<div class="finding blocked"><svg`)
-    expect(html).toContain(`<div class="finding hint"><svg`)
-    expect([...html.matchAll(new RegExp(`<span>${escaped}</span>`, 'g'))]).toHaveLength(2)
+    expect(html).not.toContain('icon-hint')
+    expect([...html.matchAll(new RegExp(`<span>${escaped}</span>`, 'g'))]).toHaveLength(1)
   })
 
-  it('keeps the original form contract, labels, preview details, and escaped content', () => {
+  it('renders the accessible 5-minute schedule, image field, preview and escaped content', () => {
     const html = renderComposerPage({
       text: '<script>alert("x")</script>',
       scheduledAt: '2024-07-15T12:00',
@@ -51,10 +60,15 @@ describe('composer markup', () => {
 
     expect(html).toContain('method="post" action="/api/submit"')
     expect(html).toContain('id="text" name="text"')
-    expect(html).toContain('id="scheduledAt" name="scheduledAt" type="datetime-local"')
+    expect(html).toContain('id="scheduledDate" name="scheduledDate" type="date"')
+    expect(html).toContain('id="scheduledHour" name="scheduledHour"')
+    expect(html).toContain('id="scheduledMinute" name="scheduledMinute"')
+    expect(html).toContain('enctype="multipart/form-data"')
+    expect(html).toContain('name="image" type="file"')
     expect(html).toContain('&lt;script&gt;alert(&quot;x&quot;)&lt;/script&gt;')
     expect(html).not.toContain('<script>alert')
-    expect(html).toContain('<span class="tabular">32</span> characters. Cost estimate &lt; 1 CHF')
+    expect(html).toContain('<span class="tabular" id="character-count">32</span> characters.')
+    expect(html).toContain('Cost estimate &lt; 1 CHF')
     expect(html).toContain('No usable review check is recorded.')
     expect(html).toContain('Review pack is missing.')
   })
@@ -65,16 +79,30 @@ describe('composer markup', () => {
       scheduledAt: '',
       charCount: 0,
       costHint: 'No cost estimate.',
-      recorded: { blocking: [], hints: [] }
+      recorded: { blocking: [] }
     })
 
     expect(html).toContain('<em>Preview</em>')
-    expect(html).toContain('No blocking findings and no hints.')
+    expect(html).toContain('No blocking findings.')
     expect(html).toContain('Review checks')
     expect(html).toContain('aria-hidden="true"')
   })
 
-  it('omits the scope divider on a blank form and shows it after a finding', () => {
+  it('renders the submit button enabled when a blocking finding is recorded', () => {
+    const html = renderComposerPage({
+      text: 'A blocking claim.',
+      scheduledAt: '',
+      charCount: 18,
+      costHint: 'No cost estimate.',
+      recorded: { blocking: ['x'] }
+    })
+    const submitButton = html.match(/<button id="submit-button"[^>]*>/)?.[0]
+
+    expect(submitButton).toBeDefined()
+    expect(submitButton).not.toMatch(/\sdisabled(?:\s|=|>)/)
+  })
+
+  it('omits the checked scope and renders the empty-state hint', () => {
     const blank = renderComposerPage({
       text: '',
       scheduledAt: '',
@@ -86,17 +114,81 @@ describe('composer markup', () => {
       scheduledAt: '',
       charCount: 0,
       costHint: 'No cost estimate.',
-      recorded: { blocking: ['A blocking finding.'], hints: [] }
+      recorded: { blocking: ['A blocking finding.'] }
     })
 
-    expect(blank).toContain('<p class="scope">')
-    expect(blank).not.toContain('<p class="scope separated">')
+    expect(blank).toContain('Checks appear here as you type.')
+    expect(blank).not.toContain('Checked:')
     expect(withFinding).toContain('A blocking finding.')
-    expect(withFinding).toContain('<p class="scope separated">')
+    expect(withFinding).not.toContain('Checked:')
+  })
+
+  it('keeps the hidden image preview hidden and provides the server finding icons to live review', () => {
+    const html = renderComposerPage({
+      text: '',
+      scheduledAt: '',
+      charCount: 0,
+      costHint: 'No cost estimate.'
+    })
+
+    expect(html).toContain('<img id="image-preview" hidden alt="Attached image">')
+    expect(html).toContain('[hidden]{display:none!important}')
+    expect(html).toContain('button:disabled,button:disabled:hover{background:var(--neutral-soft)')
+    expect(html).toContain('<template id="icon-blocked"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></template>')
+    expect(html).not.toContain('icon-hint')
+    expect(html).toContain('<template id="icon-clear"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12 4 4L19 6"/></svg></template>')
+  })
+})
+
+describe('post excerpts', () => {
+  const post = (text: string) => renderPostsPage({
+    author: true,
+    posts: [{
+      bundleId: 'bundle-1',
+      state: 'submitted',
+      scheduledLabel: '15 Jul 2024, 12:00',
+      text,
+      authorMessage: 'Waiting for approval.',
+      imageSha256: null,
+      decisionComment: null,
+      channel: null
+    }]
+  })
+
+  it('leaves short text unchanged', () => {
+    expect(truncatePostText('A short post.')).toBe('A short post.')
+  })
+
+  it('ends a long excerpt at the last word boundary and adds an ellipsis', () => {
+    const text = `${'word '.repeat(21)}locationcorrected beyond the limit`
+    expect(truncatePostText(text)).toBe(`${'word '.repeat(21).trimEnd()}…`)
+  })
+
+  it('cuts a single long word at 120 code points and adds an ellipsis', () => {
+    expect(truncatePostText('x'.repeat(130))).toBe(`${'x'.repeat(120)}…`)
+    expect(truncatePostText('x'.repeat(120))).toBe('x'.repeat(120))
+    expect(truncatePostText('x'.repeat(121))).toBe(`${'x'.repeat(120)}…`)
+  })
+
+  it('hard cuts when the only word boundary is at index zero', () => {
+    expect(truncatePostText(` ${'x'.repeat(130)}`)).toBe(` ${'x'.repeat(119)}…`)
+  })
+
+  it('counts emoji as code points and escapes the rendered excerpt', () => {
+    const text = `<tag>${'😀'.repeat(121)}`
+    expect(truncatePostText(text)).toBe(`<tag>${'😀'.repeat(115)}…`)
+    expect(post(text)).toContain(`<p>&lt;tag&gt;${'😀'.repeat(115)}…</p>`)
+    expect(post(text)).not.toContain('<tag>')
   })
 })
 
 describe('review markup', () => {
+  it('omits the Checked scope line from review findings too', () => {
+    const html = review({ recorded: { blocking: [] } })
+    expect(html).toContain('No blocking findings.')
+    expect(html).not.toContain('Checked:')
+  })
+
   it('escapes every dynamic review text field and encodes action path identifiers', () => {
     const value = "<x>&'"
     const escaped = '&lt;x&gt;&amp;&#39;'
@@ -105,7 +197,7 @@ describe('review markup', () => {
       text: value,
       scheduledLabel: value,
       state: value,
-      recorded: { blocking: [value], hints: [value] },
+      recorded: { blocking: [value] },
       lockReason: value,
       channel: { postId: 'a/b?c#d', channel: value, status: value, url: `https://example.test/post?q=${value}` }
     })
@@ -118,10 +210,14 @@ describe('review markup', () => {
     expect(html).toContain(`Channel: ${escaped}</span>`)
     expect(html).toContain(`class="status status-unknown">${escaped}</span>`)
     expect(html).toContain(`<div class="finding blocked"><svg`)
-    expect(html).toContain(`<div class="finding hint"><svg`)
+    expect(html).not.toContain('finding hint')
 
     const decideHtml = review({ bundleId: 'a/b?c#d', state: 'submitted', approver: true, lockReason: null })
     expect(decideHtml).toContain('/review/a%2Fb%3Fc%23d/decide')
+    expect(decideHtml).toContain('<label for="decision-comment">Comment for the author (optional)</label>')
+    expect(decideHtml).toContain('name="comment" maxlength="1000" rows="3"')
+    expect(review({ approver: false })).not.toContain('decision-comment')
+    expect(review({ state: 'approved' })).not.toContain('decision-comment')
 
     const uncertainHtml = review({
       state: 'approved',
@@ -141,6 +237,33 @@ describe('review markup', () => {
     })
     expect(urlHtml).not.toContain(value)
     expect(urlHtml).toContain(`href="https://example.test/post?q=${escaped}"`)
+  })
+
+  it('shows an escaped approver comment to reviewers and trims it in the posts list', () => {
+    const chunk = 'Visible <b> & "o\'k" '
+    const value = `${chunk.repeat(7)}TAIL <script>hidden</script>`
+    expect(Array.from(value).length).toBeGreaterThan(120)
+    const excerpt = truncatePostText(value)
+    expect(excerpt.endsWith('…')).toBe(true)
+    expect(excerpt).not.toBe(value)
+    const escapedExcerpt = escapeHtml(excerpt)
+    const escapedFull = escapeHtml(value)
+    const reviewHtml = review({ state: 'rejected', approver: false, decisionComment: value })
+    expect(reviewHtml).toContain('<section class="card comment" aria-label="Approver comment">')
+    expect(reviewHtml).toContain(`<p class="comment-text">${escapedFull}</p>`)
+    expect(reviewHtml).not.toContain(escapedExcerpt)
+    expect(reviewHtml).not.toContain(value)
+
+    const postsHtml = renderPostsPage({
+      author: true,
+      posts: [{
+        bundleId: 'bundle-1', state: 'rejected', text: 'Post', scheduledLabel: '15 Jul 2024, 12:00',
+        channel: null, imageSha256: null, authorMessage: 'Rejected by an approver.', decisionComment: value
+      }]
+    })
+    expect(postsHtml).toContain(`Comment: ${escapedExcerpt}`)
+    expect(postsHtml).not.toContain(escapedFull)
+    expect(postsHtml).not.toContain(value)
   })
 
   it.each([

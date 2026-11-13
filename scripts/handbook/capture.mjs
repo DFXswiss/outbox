@@ -1,5 +1,6 @@
 // JavaScript lets capture load Playwright from its isolated dependency directory, outside package.json resolution.
 import { createHash, createHmac } from 'node:crypto'
+import { deflateSync } from 'node:zlib'
 import { createServer } from 'node:http'
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -30,6 +31,10 @@ let stubPort
 let written = []
 let preservedStageRoot = null
 let xTweetSequence = 1_000_000_000
+let tfaMode = 'setup'
+// Shape captured from a locally running DFX API (ENVIRONMENT=loc) on 2026-11-10; secret replaced by a short placeholder because the handbook is public and its content gate rejects long encoded values
+const totpSecret = 'EXAMPLESECRET'
+const totpUri = 'otpauth://totp/DFX.swiss%3Acomposer%40example.com?secret=EXAMPLESECRET&issuer=DFX.swiss'
 const xResponses = new Map([
   ['The shipment update is ready for review.', 'flight'],
   ['The weekly schedule is ready to share.', 'failed'],
@@ -39,10 +44,11 @@ const xResponses = new Map([
 
 function fail(message) { throw new Error(message) }
 
-function jwt(role, account = 'handbook-composer') {
+function jwt(role, account = 1) {
   const encode = (value) => Buffer.from(JSON.stringify(value)).toString('base64url')
   const header = encode({ alg: 'HS256', typ: 'JWT' })
-  const payload = encode({ address: 'handbook@example.invalid', user: 'handbook-user', account, role })
+  // Shape: the DFX API, src/shared/auth/jwt-payload.interface.ts
+  const payload = encode({ address: 'handbook@example.invalid', user: 1, account, role: role === 'ADMIN' ? 'Admin' : 'Outbox', exp: 4102444800, tfaRequired: true })
   const signature = createHmac('sha256', secret).update(`${header}.${payload}`).digest('base64url')
   return `${header}.${payload}.${signature}`
 }
@@ -68,19 +74,55 @@ function writeJson(response, status, value) {
   response.end(JSON.stringify(value))
 }
 
+function writeEmpty(response, status) {
+  response.writeHead(status)
+  response.end()
+}
+
 async function startStub() {
   stub = createServer(async (request, response) => {
     const url = new URL(request.url ?? '/', 'http://127.0.0.1')
     if (url.pathname === '/v1/auth/introspect/outbox' || url.pathname === '/v1/auth/introspect/admin') {
       const bearer = /^Bearer\s+(.+)$/i.exec(request.headers.authorization ?? '')?.[1]
       const claims = bearer?.split('.')[1]
-      if (!claims) return writeJson(response, 401, { message: 'Sign in required.' })
+      // Captured from a locally running DFX API (ENVIRONMENT=loc) on 2026-11-10
+      if (!claims) return writeJson(response, 401, { statusCode: 401, message: 'Unauthorized' })
       const identity = JSON.parse(Buffer.from(claims, 'base64url').toString('utf8'))
-      if (url.pathname.endsWith('/admin') && identity.role !== 'ADMIN') return writeJson(response, 403, { message: 'Not allowed.' })
+      // No response body was captured for this failure. The page depends only on the status.
+      if (tfaMode === 'retry') return writeEmpty(response, 502)
+      // Captured from a locally running DFX API (ENVIRONMENT=loc) on 2026-11-09
+      if (tfaMode === 'kyc') return writeJson(response, 403, { code: 'STAFF_KYC_REQUIRED', message: 'Staff access requires a verified name on your account' })
+      // Captured from a locally running DFX API (ENVIRONMENT=loc) on 2026-11-09
+      if (url.pathname.endsWith('/admin') && identity.role !== 'Admin') return writeJson(response, 403, { statusCode: 403, message: 'Forbidden resource', error: 'Forbidden' })
+      // Captured from a locally running DFX API (ENVIRONMENT=loc) on 2026-11-10
+      // Sample was {"user":16,"account":16,"role":"Outbox"}. Values follow the signed token.
       return writeJson(response, 200, { user: identity.user, account: identity.account, role: identity.role })
     }
-    if (url.pathname === '/2/oauth2/token') return writeJson(response, 200, { access_token: 'handbook-access-token', refresh_token: 'handbook-refresh-token', expires_in: 7200 })
-    if (url.pathname === '/2/users/me') return writeJson(response, 200, { data: { username: 'handbook_demo' } })
+    // Captured from a locally running DFX API (ENVIRONMENT=loc) on 2026-11-10
+    if (url.pathname === '/v1/auth/mail') return writeEmpty(response, 201)
+    if (url.pathname === '/v1/auth/2fa/verify') {
+      // Captured from a locally running DFX API (ENVIRONMENT=loc) on 2026-11-10
+      if (tfaMode === 'wrong') return writeJson(response, 403, { statusCode: 403, message: 'Invalid or expired 2FA token', error: 'Forbidden' })
+      // Captured from a locally running DFX API (ENVIRONMENT=loc) on 2026-11-10
+      return writeEmpty(response, 201)
+    }
+    if (url.pathname === '/v1/auth/2fa') {
+      // Captured from a locally running DFX API (ENVIRONMENT=loc) on 2026-11-10
+      if (request.method === 'GET') return writeJson(response, 403, { code: 'TFA_REQUIRED', message: '2FA required (strict)', level: 'strict' })
+      // Captured from a locally running DFX API (ENVIRONMENT=loc) on 2026-11-10
+      if (tfaMode === 'setup') return writeJson(response, 201, { type: 'App', secret: totpSecret, uri: totpUri })
+      // Captured from a locally running DFX API (ENVIRONMENT=loc) on 2026-11-10
+      return writeJson(response, 409, { statusCode: 409, message: '2FA already set up', error: 'Conflict' })
+    }
+    // Shape: https://docs.x.com/fundamentals/authentication/oauth-2-0/authorization-code
+    if (url.pathname === '/2/oauth2/token') return writeJson(response, 200, { token_type: 'bearer', expires_in: 7200, access_token: 'handbook-access-token', scope: 'tweet.read tweet.write users.read offline.access', refresh_token: 'handbook-refresh-token' })
+    // Shape: https://docs.x.com/x-api/users/get-my-user
+    if (url.pathname === '/2/users/me') return writeJson(response, 200, { data: { id: '123', name: 'Handbook', username: 'handbook_demo' } })
+    if (url.pathname === '/2/media/upload' && request.method === 'POST') {
+      await readRequestBody(request)
+      // Shape: https://docs.x.com/x-api/media/upload-media
+      return writeJson(response, 200, { data: { id: '1880028106020515840', media_key: '3_1880028106020515840' } })
+    }
     if (url.pathname === '/2/tweets' && request.method === 'POST') {
       const body = JSON.parse(await readRequestBody(request))
       const responseType = xResponses.get(body.text)
@@ -88,10 +130,13 @@ async function startStub() {
         flightStarted()
         await flightRelease
       }
-      if (responseType === 'failed') return writeJson(response, 400, { title: 'Invalid request', detail: 'Fixture failure.' })
-      if (responseType === 'uncertain') return writeJson(response, 500, { title: 'Temporary error' })
+      // Shape: https://docs.x.com/x-api/fundamentals/response-codes-and-errors
+      if (responseType === 'failed') return writeJson(response, 400, { title: 'Invalid request', detail: 'Fixture failure.', type: 'about:blank', status: 400 })
+      // Shape: https://docs.x.com/x-api/fundamentals/response-codes-and-errors
+      if (responseType === 'uncertain') return writeJson(response, 500, { title: 'Temporary error', detail: 'Temporary error.', type: 'about:blank', status: 500 })
       const id = `${xTweetSequence++}`
-      return writeJson(response, 201, { data: { id } })
+      // Shape: https://docs.x.com/x-api/posts/create-post
+      return writeJson(response, 201, { data: { id, text: body.text } })
     }
     response.writeHead(404)
     response.end('Not found')
@@ -128,6 +173,7 @@ async function startApp({ missingPack = false } = {}) {
       PACK_ROOT: packRoot,
       BRAND: 'handbook',
       DFX_API_BASE_URL: `http://127.0.0.1:${stubPort}`,
+      OUTBOX_PUBLIC_URL: `http://127.0.0.1:${appPort}`,
       JWT_SECRET: secret,
       X_CLIENT_ID: 'handbook-client',
       X_CLIENT_SECRET: 'handbook-secret',
@@ -161,7 +207,7 @@ async function playwright() {
   }
 }
 
-async function context(role, account = 'handbook-composer') {
+async function context(role, account = 1) {
   const browserContext = await browser.newContext({ viewport, deviceScaleFactor, locale: 'en-GB', timezoneId: 'Europe/Zurich', extraHTTPHeaders: { authorization: `Bearer ${jwt(role, account)}` } })
   return { context: browserContext, page: await browserContext.newPage() }
 }
@@ -182,17 +228,34 @@ async function pageHeight(page) {
 }
 
 const allDecisionButtons = ['Approve', 'Reject', 'Retry', 'Mark as sent', 'Mark as failed']
+const disabledSubmitStates = new Set(['01-composer/06-typing-blocked'])
 const stateButtonPolicy = {
   '02-review-approver/01-submitted-clear': ['Approve', 'Reject'],
-  '02-review-approver/02-submitted-hints': ['Approve', 'Reject'],
+  '02-review-approver/11-submitted-image': ['Approve', 'Reject'],
+  '02-review-approver/02-comment-typed': ['Approve', 'Reject'],
   '02-review-approver/03-submitted-past': ['Reject'],
   '02-review-approver/07-failed': ['Retry'],
-  '02-review-approver/08-uncertain': ['Mark as sent', 'Mark as failed']
+  '02-review-approver/08-uncertain': ['Mark as sent', 'Mark as failed'],
+  '01-composer/01-blank': [],
+  '01-composer/02-blocked': [],
+  '01-composer/03-past-time': [],
+  '01-composer/04-pack-missing': [],
+  '01-composer/05-typing-clear': [],
+  '01-composer/06-typing-blocked': [],
+  '01-composer/07-image-selected': [],
+  '01-composer/08-bad-image': [],
+  '01-composer/09-image-dropped': [],
+  '05-posts/01-author-list': [],
+  '05-posts/02-approver-list': [],
+  '05-posts/03-empty-author': [],
+  '05-posts/04-empty-approver': []
 }
 
-async function capture(page, group, name, expected, { write = true } = {}) {
+async function capture(page, group, name, expected, { write = true, absent = [] } = {}) {
   const content = await page.locator('body').innerText()
-  for (const text of expected) if (!content.toLowerCase().includes(text.toLowerCase())) fail(`${group}/${name}: expected page text ${JSON.stringify(text)}; got ${JSON.stringify(content)}`)
+  const folded = content.toLowerCase()
+  for (const text of expected) if (!folded.includes(text.toLowerCase())) fail(`${group}/${name}: expected page text ${JSON.stringify(text)}; got ${JSON.stringify(content)}`)
+  for (const text of absent) if (folded.includes(text.toLowerCase())) fail(`${group}/${name}: page text must not include ${JSON.stringify(text)}; got ${JSON.stringify(content)}`)
   const allowed = new Set(stateButtonPolicy[`${group}/${name}`] ?? [])
   for (const label of allDecisionButtons) {
     const count = await page.getByRole('button', { name: label, exact: true }).count()
@@ -200,8 +263,11 @@ async function capture(page, group, name, expected, { write = true } = {}) {
     if (count !== expectedCount) fail(`${group}/${name}: expected ${expectedCount} button(s) named ${JSON.stringify(label)}, found ${count}`)
   }
   if (group === '01-composer') {
-    const submitCount = await page.getByRole('button', { name: 'Submit for approval', exact: true }).count()
+    const submitButton = page.getByRole('button', { name: 'Submit for approval', exact: true })
+    const submitCount = await submitButton.count()
     if (submitCount !== 1) fail(`${group}/${name}: expected exactly one Submit for approval button, found ${submitCount}`)
+    const disabled = await submitButton.isDisabled()
+    if (disabled !== disabledSubmitStates.has(`${group}/${name}`)) fail(`${group}/${name}: unexpected Submit for approval disabled state`)
   }
   await pageHeight(page)
   const image = join(outputRoot, group, `${name}.png`)
@@ -225,11 +291,66 @@ async function captureSharedState(composerPage, approverPage, name, expected) {
 }
 
 function zonedDate(minutesFromNow, fixed = false) {
-  if (fixed) return `${new Date().getFullYear() + 1}-06-15T10:00`
-  const future = Date.now() + minutesFromNow * 60_000
-  const parts = new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Zurich', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).formatToParts(new Date(future))
+  const future = fixed
+    ? Date.UTC(new Date().getFullYear() + 1, 5, 15, 8, 0)
+    : Date.now() + minutesFromNow * 60_000
+  const rounded = Math.ceil(future / 300_000) * 300_000
+  const parts = new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Zurich', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).formatToParts(new Date(rounded))
   const value = (name) => parts.find((part) => part.type === name).value
-  return `${value('year')}-${value('month')}-${value('day')}T${value('hour')}:${value('minute')}`
+  return { date: `${value('year')}-${value('month')}-${value('day')}`, hour: value('hour'), minute: value('minute') }
+}
+
+async function setScheduledTime(page, value) {
+  await page.locator('#scheduledDate').fill(value.date)
+  await page.locator('#scheduledHour').selectOption(value.hour)
+  await page.locator('#scheduledMinute').selectOption(value.minute)
+}
+
+function crc32(data) {
+  let crc = 0xffffffff
+  for (const byte of data) {
+    crc ^= byte
+    for (let bit = 0; bit < 8; bit += 1) crc = (crc >>> 1) ^ ((crc & 1) ? 0xedb88320 : 0)
+  }
+  return (crc ^ 0xffffffff) >>> 0
+}
+
+function pngChunk(type, data) {
+  const name = Buffer.from(type)
+  const length = Buffer.alloc(4)
+  length.writeUInt32BE(data.length)
+  const checksum = Buffer.alloc(4)
+  checksum.writeUInt32BE(crc32(Buffer.concat([name, data])))
+  return Buffer.concat([length, name, data, checksum])
+}
+
+function handbookPng() {
+  const width = 600
+  const height = 315
+  const rows = Buffer.alloc(height * (1 + width * 4))
+  for (let y = 0; y < height; y += 1) {
+    const offset = y * (1 + width * 4)
+    rows[offset] = 0
+    for (let x = 0; x < width; x += 1) {
+      const ratio = x / (width - 1)
+      const pixel = offset + 1 + x * 4
+      rows[pixel] = Math.round(0x1e + (255 - 0x1e) * ratio)
+      rows[pixel + 1] = Math.round(0x6e + (255 - 0x6e) * ratio)
+      rows[pixel + 2] = Math.round(0xf7 + (255 - 0xf7) * ratio)
+      rows[pixel + 3] = 255
+    }
+  }
+  const header = Buffer.alloc(13)
+  header.writeUInt32BE(width, 0)
+  header.writeUInt32BE(height, 4)
+  header[8] = 8
+  header[9] = 6
+  return Buffer.concat([
+    Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]),
+    pngChunk('IHDR', header),
+    pngChunk('IDAT', deflateSync(rows)),
+    pngChunk('IEND', Buffer.alloc(0))
+  ])
 }
 
 function captureInputs() {
@@ -272,7 +393,7 @@ function installStagedCapture(stageRoot, stagedPngs, metadataPath) {
 async function submit(composer, text, time = zonedDate(10, true)) {
   await composer.page.goto(`http://127.0.0.1:${appPort}/`)
   await composer.page.locator('#text').fill(text)
-  await composer.page.locator('#scheduledAt').fill(time)
+  await setScheduledTime(composer.page, time)
   await Promise.all([composer.page.waitForNavigation(), composer.page.locator('button[type=submit]').click()])
   const match = /\/review\/([^/?]+)/.exec(composer.page.url())
   if (!match) return { responsePage: composer.page, bundleId: null }
@@ -291,7 +412,7 @@ async function clickDecision(page, decision) {
   await request
 }
 
-async function resultFromRealResponse(page, method, path, { role = 'ADMIN', account = 'handbook-composer', body = '', origin, cookie, unauthenticated = false, expectedStatus } = {}) {
+async function resultFromRealResponse(page, method, path, { role = 'ADMIN', account = 1, body = '', origin, cookie, unauthenticated = false, expectedStatus } = {}) {
   const headers = unauthenticated ? {} : { authorization: `Bearer ${jwt(role, account)}` }
   if (body) headers['content-type'] = 'application/x-www-form-urlencoded'
   if (origin) headers.origin = origin
@@ -305,7 +426,7 @@ async function resultFromRealResponse(page, method, path, { role = 'ADMIN', acco
   return { status: response.status, body: responseBody }
 }
 
-async function waitFor(text, timeoutMs = 180_000) {
+async function waitFor(text, timeoutMs = 600_000) {
   const end = Date.now() + timeoutMs
   while (Date.now() < end) {
     const rows = await fetch(`http://127.0.0.1:${appPort}/api/posts`, { headers: { authorization: `Bearer ${jwt('ADMIN')}` } }).then((response) => response.json())
@@ -327,8 +448,8 @@ async function captureStaticErrors(composer, approver) {
   const page = await approver.context.newPage()
   await page.goto(`http://127.0.0.1:${appPort}/`)
   await page.evaluate(() => { document.cookie = 'outbox=invalid; path=/' })
-  await resultFromRealResponse(page, 'GET', '/', { unauthenticated: true, expectedStatus: 401 })
-  await capture(page, '04-results-and-errors', '06-sign-in-required', ['Sign in required'])
+  await resultFromRealResponse(page, 'POST', '/api/submit', { unauthenticated: true, body: 'text=Fixture', expectedStatus: 401 })
+  await capture(page, '04-results-and-errors', '06-sign-in-required', ['Sign in required.'])
 
   await resultFromRealResponse(page, 'POST', '/api/submit', { role: 'OUTBOX', body: 'text=Fixture&scheduledAt=2030-01-01T10%3A00' , cookie: `outbox=${encodeURIComponent(jwt('OUTBOX'))}`, origin: 'https://example.invalid', expectedStatus: 403 })
   await capture(page, '04-results-and-errors', '07-forbidden-origin', ['Forbidden', 'Origin does not match this host.'])
@@ -337,7 +458,7 @@ async function captureStaticErrors(composer, approver) {
   await capture(page, '04-results-and-errors', '08-not-found', ['Request failed', 'Not found.'])
 
   const privateEntry = await submit(composer, 'A neutral private example for visibility.', zonedDate(10, true))
-  await resultFromRealResponse(page, 'GET', `/review/${privateEntry.bundleId}`, { role: 'OUTBOX', account: 'other-handbook-composer', expectedStatus: 403 })
+  await resultFromRealResponse(page, 'GET', `/review/${privateEntry.bundleId}`, { role: 'OUTBOX', account: 2, expectedStatus: 403 })
   await capture(page, '04-results-and-errors', '09-not-visible', ['Request failed', 'Not visible.'])
 
   await resultFromRealResponse(page, 'POST', `/review/${privateEntry.bundleId}/decide`, { role: 'OUTBOX', body: 'decision=approve', expectedStatus: 403 })
@@ -363,42 +484,160 @@ async function main() {
   const composer = await context('OUTBOX')
   const approver = await context('ADMIN')
 
+  const loginContext = await browser.newContext({ viewport, deviceScaleFactor })
+  const loginPage = await loginContext.newPage()
+  await loginPage.goto(`http://127.0.0.1:${appPort}/login`)
+  await capture(loginPage, '06-login', '01-login', ['Sign in with email', 'Sign in with wallet', 'No wallet found. Install or enable a browser wallet.'])
+  await loginPage.locator('#mail').fill('test@example.invalid')
+  await Promise.all([loginPage.waitForNavigation(), loginPage.locator('form[action="/auth/mail"] button').click()])
+  await capture(loginPage, '06-login', '02-mail-sent', ['Open the link in the email to continue'])
+  if (await loginPage.locator('.result-icon.success').count() !== 1 || await loginPage.locator('.result-icon.error').count() !== 0) fail('06-login/02-mail-sent: expected success icon without error icon')
+  await loginPage.goto(`http://127.0.0.1:${appPort}/auth/callback?session=${encodeURIComponent(jwt('OUTBOX'))}`)
+  await capture(loginPage, '06-login', '03-tfa-setup', [totpSecret, 'six-digit code'])
+  tfaMode = 'configured'
+  await loginPage.reload()
+  await capture(loginPage, '06-login', '04-tfa-code', ['six-digit code'], { absent: ['Set up your authenticator', 'Secret:'] })
+  tfaMode = 'wrong'
+  await loginPage.locator('#code').fill('123456')
+  await Promise.all([loginPage.waitForNavigation(), loginPage.locator('form[action="/auth/tfa"] button').click()])
+  await capture(loginPage, '06-login', '05-tfa-wrong', ['Invalid code'])
+  tfaMode = 'kyc'
+  await loginPage.locator('#code').fill('123456')
+  await Promise.all([loginPage.waitForNavigation(), loginPage.locator('form[action="/auth/tfa"] button').click()])
+  await capture(loginPage, '06-login', '06-kyc', ['no verified name'], { absent: ['six-digit code'] })
+  tfaMode = 'retry'
+  await loginPage.goto(`http://127.0.0.1:${appPort}/auth/callback?session=${encodeURIComponent(jwt('OUTBOX'))}`)
+  await loginPage.locator('#code').fill('123456')
+  await Promise.all([loginPage.waitForNavigation(), loginPage.locator('form[action="/auth/tfa"] button').click()])
+  await capture(loginPage, '06-login', '07-tfa-retry', ['Please try again.', 'six-digit code'], { absent: ['Invalid code'] })
+  tfaMode = 'configured'
+  await loginContext.close()
+
   await composer.page.goto(`http://127.0.0.1:${appPort}/`)
   const language = await composer.page.evaluate(() => navigator.language)
   if (language !== 'en-GB') fail(`Expected browser language en-GB before the blank form capture; got ${language}`)
   await capture(composer.page, '01-composer', '01-blank', ['Submit for approval', 'Preview'])
+  await setScheduledTime(composer.page, zonedDate(10))
 
-  await composer.page.locator('#text').fill('Guaranteed returns for everyone who joins this week.')
-  await composer.page.locator('#scheduledAt').fill(zonedDate(10, true))
-  await Promise.all([composer.page.waitForNavigation(), composer.page.locator('button[type=submit]').click()])
-  await capture(composer.page, '01-composer', '02-blocked', ['Blocking review finding.', 'Forbidden claim: guaranteed returns'])
+  const emptyAuthorPosts = await composer.context.newPage()
+  await emptyAuthorPosts.goto(`http://127.0.0.1:${appPort}/posts`)
+  await capture(emptyAuthorPosts, '05-posts', '03-empty-author', ['Posts', 'No posts yet.', 'Write a post'])
+  const emptyApproverPosts = await approver.context.newPage()
+  await emptyApproverPosts.goto(`http://127.0.0.1:${appPort}/posts`)
+  await capture(emptyApproverPosts, '05-posts', '04-empty-approver', ['Posts', 'No posts yet.'], { absent: ['Write a post'] })
+
+  const clearDraft = 'The service update is ready for a careful review.'
+  const clearReview = composer.page.waitForResponse((response) => response.url().endsWith('/api/review') && response.request().method() === 'POST')
+  await composer.page.locator('#text').fill(clearDraft)
+  await clearReview
+  await composer.page.getByText('No blocking findings.', { exact: true }).waitFor()
+  await capture(composer.page, '01-composer', '05-typing-clear', ['No blocking findings.', clearDraft])
+
+  const blockedDraft = 'Everyone who joins this week gets guaranteed returns.'
+  const blockedReview = composer.page.waitForResponse((response) => response.url().endsWith('/api/review') && response.request().method() === 'POST')
+  await composer.page.locator('#text').fill(blockedDraft)
+  await blockedReview
+  await composer.page.getByText('Forbidden claim: guaranteed returns', { exact: true }).waitFor()
+  await capture(composer.page, '01-composer', '06-typing-blocked', ['Forbidden claim: guaranteed returns', blockedDraft])
+
+  const testPng = handbookPng()
+  await composer.page.locator('#text').fill('A calm image accompanies this update.')
+  const imageTextReview = composer.page.waitForResponse((response) => response.url().endsWith('/api/review') && response.request().method() === 'POST')
+  await imageTextReview
+  await composer.page.getByText('No blocking findings.', { exact: true }).waitFor()
+  await composer.page.locator('#image').setInputFiles({ name: 'handbook-image.png', mimeType: 'image/png', buffer: testPng })
+  await composer.page.locator('#image-preview:not([hidden])').waitFor()
+  await capture(composer.page, '01-composer', '07-image-selected', ['Submit for approval'])
+
+  await composer.page.locator('#image').setInputFiles({ name: 'handbook-image.txt', mimeType: 'text/plain', buffer: Buffer.from('not an image') })
+  await composer.page.locator('#image-message').getByText('Choose a PNG or JPEG image.', { exact: true }).waitFor()
+  const badImageNavigation = composer.page.waitForNavigation()
+  await composer.page.locator('#submit-button').click()
+  await badImageNavigation
+  await composer.page.getByText('No blocking findings.', { exact: true }).waitFor()
+  await capture(composer.page, '01-composer', '08-bad-image', [
+    'Image must be a PNG or JPEG up to 5 MB.',
+    'No blocking findings.'
+  ])
+
+  const noScriptContext = await browser.newContext({ viewport, deviceScaleFactor, locale: 'en-GB', timezoneId: 'Europe/Zurich', javaScriptEnabled: false, extraHTTPHeaders: { authorization: `Bearer ${jwt('OUTBOX')}` } })
+  const droppedPage = await noScriptContext.newPage()
+  await droppedPage.goto(`http://127.0.0.1:${appPort}/`)
+  await droppedPage.locator('#text').fill(blockedDraft)
+  await setScheduledTime(droppedPage, zonedDate(10))
+  await droppedPage.locator('#image').setInputFiles({ name: 'handbook-image.png', mimeType: 'image/png', buffer: testPng })
+  const droppedNavigation = droppedPage.waitForNavigation()
+  await droppedPage.locator('#submit-button').click()
+  await droppedNavigation
+  await capture(droppedPage, '01-composer', '09-image-dropped', ['Blocking review finding.', 'Choose the image again — it was not kept.'])
+  await noScriptContext.close()
+
+  const noScriptBlockedContext = await browser.newContext({ viewport, deviceScaleFactor, locale: 'en-GB', timezoneId: 'Europe/Zurich', javaScriptEnabled: false, extraHTTPHeaders: { authorization: `Bearer ${jwt('OUTBOX')}` } })
+  const serverBlockedPage = await noScriptBlockedContext.newPage()
+  await serverBlockedPage.goto(`http://127.0.0.1:${appPort}/`)
+  await serverBlockedPage.locator('#text').fill(blockedDraft)
+  await setScheduledTime(serverBlockedPage, zonedDate(10))
+  await Promise.all([serverBlockedPage.waitForNavigation(), serverBlockedPage.locator('button[type=submit]').click()])
+  await capture(serverBlockedPage, '01-composer', '02-blocked', ['Blocking review finding.', 'Forbidden claim: guaranteed returns'])
+  await noScriptBlockedContext.close()
 
   await composer.page.locator('#text').fill('A neutral post with a future review time.')
-  await composer.page.locator('#scheduledAt').fill(zonedDate(-1))
+  await setScheduledTime(composer.page, zonedDate(-10))
   await Promise.all([composer.page.waitForNavigation(), composer.page.locator('button[type=submit]').click()])
-  await capture(composer.page, '01-composer', '03-past-time', ['The scheduled time is already in the past.'])
+  await composer.page.getByText('No blocking findings.', { exact: true }).waitFor()
+  await capture(composer.page, '01-composer', '03-past-time', [
+    'The scheduled time is already in the past.',
+    'No blocking findings.'
+  ])
 
-  const clear = await submit(composer, 'A short update is scheduled after tomorrow’s review.')
+  const firstAuthorText = 'A short update is scheduled after tomorrow’s review.'
+  const clear = await submit(composer, firstAuthorText)
   const clearApprover = await reviewPage(approver.context, clear.bundleId)
-  await capture(clearApprover, '02-review-approver', '01-submitted-clear', ['submitted', 'Approve', 'Reject', 'No blocking findings and no hints.'])
-  await capture(await reviewPage(composer.context, clear.bundleId), '03-review-author', '01-submitted-clear', ['submitted', 'No blocking findings and no hints.'])
+  await capture(clearApprover, '02-review-approver', '01-submitted-clear', ['submitted', 'Approve', 'Reject', 'No blocking findings.', 'Comment for the author (optional)'])
+  await capture(await reviewPage(composer.context, clear.bundleId), '03-review-author', '01-submitted-clear', ['submitted', 'No blocking findings.'])
+  const imageDraft = 'A reference image is attached to this submitted update.'
+  await composer.page.goto(`http://127.0.0.1:${appPort}/`)
+  await composer.page.locator('#text').fill(imageDraft)
+  await setScheduledTime(composer.page, zonedDate(10, true))
+  await composer.page.locator('#image').setInputFiles({ name: 'handbook-image.png', mimeType: 'image/png', buffer: testPng })
+  const imageSubmissionNavigation = composer.page.waitForNavigation()
+  await composer.page.locator('#submit-button').click()
+  await imageSubmissionNavigation
+  const imageBundleId = /\/review\/([^/?]+)/.exec(composer.page.url())?.[1]
+  if (!imageBundleId) fail('Image submission did not open its review page')
+  const imageReview = await reviewPage(approver.context, decodeURIComponent(imageBundleId))
+  await capture(imageReview, '02-review-approver', '11-submitted-image', ['submitted', imageDraft, 'Approve', 'Reject'])
   await clickDecision(clearApprover, 'approve')
   await capture(clearApprover, '04-results-and-errors', '01-approved-queued', ['Decided', 'Approved and queued.'])
   const approvedBundle = clear.bundleId
   const approvedReview = await reviewPage(approver.context, approvedBundle)
   await captureSharedState(await reviewPage(composer.context, approvedBundle), approvedReview, '04-pending', ['approved', 'pending'])
 
-  const hintText = 'Our team will review the updated schedule, confirm the revised delivery window, check that every location has the correct contact details, and share the final notice with staff once the maintenance work is complete before offices reopen.'
-  const hinted = await submit(composer, hintText)
-  const hintedAdmin = await reviewPage(approver.context, hinted.bundleId)
-  await capture(hintedAdmin, '02-review-approver', '02-submitted-hints', ['A sentence is longer than 35 words.', 'Approve', 'Reject'])
-  await capture(await reviewPage(composer.context, hinted.bundleId), '03-review-author', '02-submitted-hints', ['A sentence is longer than 35 words.'])
-  await clickDecision(hintedAdmin, 'reject')
-  await capture(hintedAdmin, '04-results-and-errors', '02-rejected-result', ['Decided', 'Rejected.'])
-  await captureSharedState(await reviewPage(composer.context, hinted.bundleId), await reviewPage(approver.context, hinted.bundleId), '09-rejected', ['rejected'])
+  const commentText = 'A revised event announcement is ready for approval.'
+  const commented = await submit(composer, commentText)
+  const commentAdmin = await reviewPage(approver.context, commented.bundleId)
+  const approverComment = 'Please name the date of the event.'
+  await commentAdmin.locator('#decision-comment').fill(approverComment)
+  if (await commentAdmin.locator('#decision-comment').inputValue() !== approverComment) fail('Approver comment was not present before the comment capture')
+  await capture(commentAdmin, '02-review-approver', '02-comment-typed', ['submitted', commentText, 'Comment for the author (optional)', 'Approve', 'Reject'])
+
+  const longCommentEntry = await submit(composer, 'A separate event update is ready for review.')
+  const longCommentAdmin = await reviewPage(approver.context, longCommentEntry.bundleId)
+  await longCommentAdmin.locator('#decision-comment').evaluate((field) => field.removeAttribute('maxlength'))
+  await longCommentAdmin.locator('#decision-comment').fill('x'.repeat(1001))
+  await Promise.all([longCommentAdmin.waitForNavigation(), longCommentAdmin.locator('button[name=decision][value=reject]').click()])
+  await capture(longCommentAdmin, '04-results-and-errors', '13-comment-too-long', ['Request failed', 'Comment must be at most 1000 characters.'])
+
+  await clickDecision(commentAdmin, 'reject')
+  await capture(commentAdmin, '04-results-and-errors', '02-rejected-result', ['Decided', 'Rejected.'])
+  await captureSharedState(await reviewPage(composer.context, commented.bundleId), await reviewPage(approver.context, commented.bundleId), '09-rejected', ['rejected'])
+  await capture(await reviewPage(composer.context, commented.bundleId), '03-review-author', '02-rejected-comment', ['Rejected by an approver.', 'Comment from the approver', approverComment])
+  const commentedPosts = await composer.context.newPage()
+  await commentedPosts.goto(`http://127.0.0.1:${appPort}/posts`)
+  await capture(commentedPosts, '05-posts', '05-author-comment', ['Rejected by an approver.', `Comment: ${approverComment}`])
 
   const pastLock = await submit(composer, 'A post that will be reviewed after its time.', zonedDate(1))
-  await new Promise((resolvePromise) => setTimeout(resolvePromise, 65_000))
+  await new Promise((resolvePromise) => setTimeout(resolvePromise, 6 * 60_000 + 5_000))
   const lockedReview = await reviewPage(approver.context, pastLock.bundleId)
   await capture(lockedReview, '02-review-approver', '03-submitted-past', ['scheduled time has already passed', 'Reject'])
   await capture(await reviewPage(composer.context, pastLock.bundleId), '03-review-author', '03-submitted-past', ['scheduled time has already passed'])
@@ -421,6 +660,17 @@ async function main() {
   const failedAdmin = await reviewPage(approver.context, failed.bundleId)
   await capture(failedAdmin, '02-review-approver', '07-failed', ['failed', 'Retry'])
   await capture(await reviewPage(composer.context, failed.bundleId), '03-review-author', '07-failed', ['failed'])
+  const otherAuthorText = 'A separate author update for the approver list.'
+  const secondAuthor = await context('OUTBOX', 3)
+  const otherAuthorPost = await submit(secondAuthor, otherAuthorText)
+  if (!otherAuthorPost.bundleId) fail('Second author submission did not open its review page')
+  const authorPosts = await composer.context.newPage()
+  await authorPosts.goto(`http://127.0.0.1:${appPort}/posts`)
+  await capture(authorPosts, '05-posts', '01-author-list', [
+    'Posts', 'Waiting for approval.', 'Approved. Goes out at the scheduled time.',
+    'Published on X.', 'Sending failed. An approver can retry.', 'Rejected by an approver.',
+    'Image attached', 'View on X'
+  ], { absent: [otherAuthorText] })
   await Promise.all([failedAdmin.waitForNavigation(), failedAdmin.locator('button').filter({ hasText: 'Retry' }).click()])
   await capture(failedAdmin, '04-results-and-errors', '03-retry-result', ['Post updated', 'pending'])
 
@@ -444,12 +694,22 @@ async function main() {
   const missingPackContext = await context('OUTBOX')
   await missingPackContext.page.goto(`http://127.0.0.1:${appPort}/`)
   await missingPackContext.page.locator('#text').fill('We will share the revised opening hours tomorrow morning.')
-  await missingPackContext.page.locator('#scheduledAt').fill(zonedDate(10, true))
+  await setScheduledTime(missingPackContext.page, zonedDate(10, true))
   await Promise.all([missingPackContext.page.waitForNavigation(), missingPackContext.page.locator('button[type=submit]').click()])
-  await capture(missingPackContext.page, '01-composer', '04-pack-missing', ['Review pack is missing.'])
+  await missingPackContext.page.getByText('Check unavailable — it runs again on submit.', { exact: true }).waitFor()
+  await capture(missingPackContext.page, '01-composer', '04-pack-missing', [
+    'Review pack is missing.',
+    'Check unavailable — it runs again on submit.'
+  ])
   await missingPackContext.context.close()
   app = originalApp
   appPort = originalAppPort
+
+  const approverPosts = await approver.context.newPage()
+  await approverPosts.goto(`http://127.0.0.1:${appPort}/posts`)
+  await capture(approverPosts, '05-posts', '02-approver-list', [
+    'Posts', otherAuthorText, firstAuthorText, 'Open'
+  ])
 
   await captureStaticErrors(composer, approver)
 

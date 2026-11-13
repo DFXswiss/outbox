@@ -1,0 +1,3 @@
+# Image cleared after a blocked submission
+
+This screen uses a real multipart form submission with JavaScript disabled. The page shows the Outbox brand and New post and Posts navigation. The Text field contains “Everyone who joins this week gets guaranteed returns.” The Scheduled time (Europe/Zurich) fields show a date, hour, and minute on a five-minute step. A cross icon precedes “Blocking review finding.” The image field shows the “Choose File” button and “No file chosen”, with a note saying “Choose the image again — it was not kept.” The preview shows the text, character count, and cost hint and has no image symbol. A cross icon also precedes “Forbidden claim: guaranteed returns” in the checks card.
